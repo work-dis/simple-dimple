@@ -73,7 +73,6 @@ function App() {
       !authAccount.isAdmin
     ) {
       return;
-      return;
     }
     void adminUsers.loadAdminUsers();
   }, [screen, authAccount.isAuthenticated, authAccount.isAdmin]);
@@ -169,8 +168,14 @@ function App() {
             auth={authAccount.auth}
             account={authAccount.account}
             routeDecisionOps={routeDecisionOps.routeDecisionOps}
+            opsAlerts={routeDecisionOps.opsAlerts}
+            opsAlertEscalationPreviews={routeDecisionOps.opsAlertEscalationPreviews}
             isSubmitting={isSubmitting}
             onReload={routeDecisionOps.loadRouteDecisionOps}
+            onAcknowledgeAlert={routeDecisionOps.acknowledgeOpsAlert}
+            onSnoozeAlert={routeDecisionOps.snoozeOpsAlert}
+            onUnacknowledgeAlert={routeDecisionOps.unacknowledgeOpsAlert}
+            onLoadEscalationPreview={routeDecisionOps.loadOpsAlertEscalationPreview}
           />
         )}
 

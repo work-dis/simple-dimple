@@ -19,15 +19,37 @@ export function readNetworkType(): string {
   return "unknown";
 }
 
+function readCarrier(): string | undefined {
+  const connection = (
+    navigator as Navigator & { connection?: NavigatorConnectionLike }
+  ).connection;
+  const carrier = (connection as Record<string, unknown> | undefined)?.["carrier"];
+  return typeof carrier === "string" && carrier.trim().length > 0 ? carrier.trim() : undefined;
+}
+
 export function buildRouteContext(): TelemetryNetworkContext {
-  return { networkType: readNetworkType() };
+  const ctx: TelemetryNetworkContext = {
+    networkType: readNetworkType(),
+    carrier: readCarrier(),
+  };
+
+  // Strip undefined values so URLSearchParams doesn't choke
+  return Object.fromEntries(
+    Object.entries(ctx).filter(([_, v]) => v !== undefined).map(([k, v]) => [k, String(v)])
+  ) as unknown as TelemetryNetworkContext;
 }
 
 export async function submitProbeReport(server: ServerOption) {
   try {
+    const { getStoredAuthSessionId } = await import("./http");
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const sessionId = getStoredAuthSessionId();
+    if (sessionId) {
+      headers["x-auth-session-id"] = sessionId;
+    }
     await fetch("/api/telemetry/probe", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({
         endpointId: server.id,
         transportProfile: server.transportProfile,

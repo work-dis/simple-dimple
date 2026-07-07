@@ -32,13 +32,15 @@ export function useRouteSession({
   async function loadSession() {
     try {
       onClearError();
-      const sessionQuery = new URLSearchParams(buildRouteContext());
+      const sessionQuery = new URLSearchParams(
+        buildRouteContext() as unknown as Record<string, string>,
+      );
       const data = await readJson<SessionResponse>(
         `/api/session?${sessionQuery.toString()}`,
       );
 
       setSession(data.session);
-      setServers(data.servers);
+      setServers(data.servers ?? []);
       setCurrentAssignment(data.currentAssignment);
       setRouteHealth(data.routeHealth);
       setRoutePolicy(data.routePolicy);

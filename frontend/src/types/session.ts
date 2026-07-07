@@ -25,7 +25,7 @@ export type EndpointAssignment = {
 
 export type SessionResponse = {
   session: Session;
-  servers: ServerOption[];
+  servers?: ServerOption[];
   currentAssignment: EndpointAssignment | null;
   routeHealth: RouteHealthSnapshot[];
   routePolicy: RoutePolicy;

@@ -91,5 +91,9 @@ export type RouteHealthSnapshot = {
 };
 
 export type TelemetryNetworkContext = {
-  networkType: string;
+  networkType?: string;
+  carrier?: string;
+  asn?: number;
+  countryCode?: string;
+  region?: string;
 };
