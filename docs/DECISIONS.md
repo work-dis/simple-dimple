@@ -332,7 +332,7 @@
 
 Решение:
 
-- `seedDefaultData()` вызывается один раз после создания store, а не в каждом методе чтения/записи
+- `seedDefaultData()` вызывался один раз после создания store, но позже удалён — демо-данные живут только в Prisma-миграциях
 - `recomputeAnalyticsForFingerprint()` удаляет ranking только для текущего time bucket (`expiresAt: bucketEnd`) вместо полной очистки всей истории fingerprint
 - auth-сессии создаются с `randomUUID()`, а не с фиксированным `id = "primary"`; `readState()` ищет последнюю активную сессию через `findFirst`, а не `findUnique` по жёсткому id
 - добавлен `writeSession(session)` — метод, обновляющий только `AppSession`, без перезаписи `user`, `subscription`, `device`, `auth` и ranking-данных
@@ -340,7 +340,7 @@
 
 Почему:
 
-- inline-вызов `seedDefaultData()` в каждом методе давал 7 лишних DB-запросов на каждый API-вызов
+- inline-вызов `seedDefaultData()` в каждом методе давал 7 лишних DB-запросов на каждый API-вызов; при рефакторинге seed был вынесен в конструктор, а позже удалён полностью
 - удаление всей истории ranking при пересчёте одного bucket — это потеря данных для трендов и аналитики
 - фиксированное id `"primary"` не позволяло поддерживать несколько активных сессий с разных устройств
 - `writeState()` перезаписывал всю вложенную структуру, хотя connect/disconnect/server-select меняют только `AppSession`

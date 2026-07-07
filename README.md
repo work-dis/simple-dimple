@@ -156,12 +156,13 @@ simple-dimple/
 │               ├── index.ts      # Баррель
 │               └── (общие UI-компоненты)
 │
-└── docs/                     # Документация
+├── docs/                     # Документация
     ├── ARCHITECTURE.md       # Техническая архитектура
-    ├── DEV_SETUP.md          # Локальный dev setup
-    ├── DB_SCHEMA.md          # Схема данных БД
     ├── CHANGELOG.md          # Changelog
+    ├── CODE_REVIEW.md        # Code review findings
+    ├── DB_SCHEMA.md          # Схема данных БД
     ├── DECISIONS.md          # Архитектурные решения
+    ├── DEV_SETUP.md          # Локальный dev setup
     ├── PRODUCT.md            # Продуктовая идея
     ├── ROADMAP.md            # Roadmap
     └── NETWORK_INTELLIGENCE.md  # Network intelligence
@@ -213,9 +214,31 @@ CI в GitHub Actions прогоняет те же проверки послед�
 
 Следующий логичный шаг:
 
-1. усиливать worker-specific observability и execution audit вокруг persisted job lifecycle
-2. поднимать более явные job-level dashboards в ops-слое
-3. затем плотнее связывать job-level execution signals с route-quality observation
+1. решать, нужен ли поверх текущего focused triage drilldown отдельный alert delivery path
+2. затем думать, стоит ли выносить часть ops-наблюдения в ещё более специализированный surface
+3. параллельно держать docs и ops-контракт синхронизированными, чтобы roadmap не отставал от реального кода
+
+Если приземлять это на локальный репозиторий без внешних сервисов, то следующий practical increment такой:
+
+1. persisted `ops alerts` feed в backend
+2. admin-only acknowledge/snooze flow
+3. отдельная alert list в текущем `Ops` экране
+
+Рабочая очередь:
+
+1. migration и storage-модель `OpsAlert`
+2. detector для сигналов из quality/execution trail
+3. admin API для feed + lifecycle actions
+4. `Ops` UI для triage
+
+Текущий статус:
+
+- `OpsAlert` storage и admin API уже подняты в backend
+- persisted alerts feed уже показан в `Ops` UI с actions `acknowledge / snooze / reopen`
+- alert rules уже вынесены в отдельный detector module
+- persisted alerts теперь дополнительно refresh-ятся из worker/runtime контура, а не только при чтении `GET /api/ops/alerts`
+- `Ops` теперь уже умеет показывать escalation preview по admin contacts для каждого persisted alert-а
+- следующим шагом уже остаётся реальная delivery execution поверх этого preview-слоя, а не только моделирование recipients
 
 ## Документация
 
@@ -226,4 +249,5 @@ CI в GitHub Actions прогоняет те же проверки послед�
 - архитектура: [docs/ARCHITECTURE.md](/Users/miko/Documents/simple-dimple/docs/ARCHITECTURE.md)
 - схема БД: [docs/DB_SCHEMA.md](/Users/miko/Documents/simple-dimple/docs/DB_SCHEMA.md)
 - roadmap: [docs/ROADMAP.md](/Users/miko/Documents/simple-dimple/docs/ROADMAP.md)
+- code review: [docs/CODE_REVIEW.md](/Users/miko/Documents/simple-dimple/docs/CODE_REVIEW.md)
 - network intelligence: [docs/NETWORK_INTELLIGENCE.md](/Users/miko/Documents/simple-dimple/docs/NETWORK_INTELLIGENCE.md)

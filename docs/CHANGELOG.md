@@ -10,6 +10,219 @@
 
 ## 2026-07-07
 
+### Ops alert escalation preview over admin contacts
+
+Что сделали:
+
+- backend `ops alerts` store теперь умеет строить `escalation preview` для конкретного alert-а по его `severity/status` и текущим admin contacts
+- подняли admin-only endpoint `GET /api/ops/alerts/:alertId/escalation-preview`
+- `Ops` UI теперь по кнопке показывает escalation level, recipients и channel preview прямо рядом с persisted alert lifecycle
+- добавили unit-test на escalation semantics и синхронизировали `README`, `ROADMAP`, `ARCHITECTURE` и `DEV_SETUP`
+
+Зачем:
+
+- сделать следующий шаг roadmap про delivery path более конкретным: не "кому-нибудь когда-нибудь отправить", а уже иметь готовый recipient/channel preview
+- дать администратору возможность видеть внешний delivery object до подключения реальных `Telegram/email` интеграций
+- честно сместить следующую очередь уже к delivery execution, а не только к локальному feed или abstract escalation ideas
+
+### Ops alert refresh moved into worker/runtime contour
+
+Что сделали:
+
+- `route-reprobe` worker теперь умеет вызывать refresh persisted `ops alerts` даже когда никто не читает `GET /api/ops/alerts`
+- после успешной обработки job refresh форсируется сразу, а в idle-состоянии идёт по отдельному интервалу `OPS_ALERT_REFRESH_INTERVAL_MS`
+- добавили unit-test на worker flow, который проверяет, что alert refresh живёт отдельно от UI read-path
+- синхронизировали `README`, `ROADMAP`, `ARCHITECTURE` и `DEV_SETUP` с тем, что detector lifecycle уже частично отвязан от summary-read path
+
+Зачем:
+
+- убрать лишнюю зависимость materialized alert lifecycle от открытия `Ops` экрана
+- приблизить alerts к настоящему background/runtime объекту, а не только к on-demand read model
+- честно сдвинуть следующий шаг roadmap уже к внешнему delivery path или escalation semantics
+
+### Ops alert detector extracted from summary-only path
+
+Что сделали:
+
+- вынесли alert rules в отдельный backend-модуль [backend/src/store/ops-alert-detector.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alert-detector.ts:1)
+- `buildRouteDecisionOpsSummary` теперь собирает `operationalSummary.alerts` через общий detector, а не через локальную встроенную ветку условий
+- persisted `OpsAlert` feed теперь тоже использует тот же detector поверх summary metrics, а не читает готовые `operationalSummary.alerts` как единственный источник
+- добавили проверку в `route-decision-ops` test, что summary-alerts и detector дают один и тот же alert set
+
+Зачем:
+
+- ослабить связку между persisted alert feed и конкретной формой `operationalSummary`
+- сделать следующий шаг к более самостоятельному detector lifecycle без дублирования правил
+- удержать один источник правды для alert semantics в backend-е
+
+### Persisted alerts feed in Ops UI
+
+Что сделали:
+
+- frontend `useRouteDecisionOps` теперь загружает не только `route-decisions`, но и persisted `ops alerts` feed, а также умеет вызывать `acknowledge / snooze / unacknowledge`
+- `Ops` экран теперь показывает отдельную секцию `Persisted alerts feed` с lifecycle-статусом alert-а и явными triage-действиями
+- `App` связал новый alert feed с существующим ops-screen flow, без вынесения в отдельный экран
+- проверили связку сборками frontend и backend после появления нового UI-контракта
+
+Зачем:
+
+- закрыть следующий UI-шаг плана поверх уже поднятого backend alert feed
+- дать администратору возможность не только видеть persisted alert, но и реально менять его lifecycle из интерфейса
+- честно сместить следующую очередь уже к более самостоятельному detector lifecycle, а не к отсутствующему UI
+
+### OpsAlert storage and admin API baseline
+
+Что сделали:
+
+- добавили Prisma-модель `OpsAlert` и миграцию `20260707183000_ops_alerts` с persisted lifecycle-полями для `active / acknowledged / snoozed / resolved`
+- добавили backend store [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1), который materialize-ит текущие summary-alerts в persisted feed и умеет `list / acknowledge / snooze / unacknowledge`
+- расширили state store и admin API endpoint-ами `GET /api/ops/alerts`, `POST /api/ops/alerts/:id/acknowledge`, `POST /api/ops/alerts/:id/snooze`, `POST /api/ops/alerts/:id/unacknowledge`
+- зафиксировали `ops_alerts` как часть схемы данных и dev-пути, чтобы следующий шаг уже строился поверх живого backend-контракта
+
+Зачем:
+
+- закрыть первый backend/storage этап плана про `local-first ops alert feed`
+- отделить persisted alert lifecycle от вычисляемого `operationalSummary`, чтобы alert можно было увидеть и обработать позже
+- подготовить чистую базу под следующий шаг с `Ops` UI и более явным detector lifecycle
+
+### Next step documented as local-first ops alert feed
+
+Что зафиксировали:
+
+- в `ROADMAP`, `ARCHITECTURE`, `README` и `DEV_SETUP` следующий шаг после focused triage layer теперь описан не абстрактно, а как локальный persisted `ops alerts` feed
+- отдельно зафиксировали, что первый `alert delivery path` для этого репозитория должен быть внутренним: backend + admin-only UI, без обязательного `Telegram/email/push`
+- также зафиксировали, что acknowledge/snooze lifecycle должен жить в БД как рабочий объект, а не быть только вычисляемым summary
+- поверх этого добавили и сам рабочий implementation plan: schema -> detector -> store/runtime -> admin API -> ops UI -> verification
+
+Зачем:
+
+- локальный репозиторий пока не требует преждевременного ухода во внешние интеграции
+- так проще проверить, действительно ли текущему ops слою нужен отдельный delivery path
+- это делает следующую реализацию намного конкретнее: не "придумать ещё alerting", а построить persisted alert feed поверх уже существующего observation trail
+
+### Focused worker/network/job drilldown in Ops
+
+Что сделали:
+
+- расширили `routeReprobeExecution` в `GET /api/ops/route-decisions`: summary теперь возвращает `focusedDrilldowns.worker`, `focusedDrilldowns.network` и `focusedDrilldowns.job`
+- backend выбирает один приоритетный `worker`, одну проблемную `network` и один показательный `job trail` поверх уже существующих alerts/hotspots/timeline, чтобы triage начинался с самого шумного среза
+- `Ops` экран теперь показывает отдельный блок `Focused triage drilldown` с коротким explainable разбором по worker activity, network degradation и attempt trail конкретной job
+- закрепили новый focused drilldown unit-тестом в `route-decision-ops` coverage
+
+Зачем:
+
+- закрыть следующий roadmap-шаг про более focused drilldown для одного `worker/network/job trail`, а не только про широкие summary-карточки
+- дать администратору быстрый старт triage без ручного перехода между `worker hotspots`, `network hotspots`, `failure drilldown` и `recent jobs`
+- честно сдвинуть следующую очередь уже к решению, нужен ли отдельный alert delivery path или ещё более специализированный surface
+
+### Request-scoped auth sessions instead of process-global auth
+
+Что сделали:
+
+- backend auth-flow перевели с process-global `auth/account` переменных на request-scoped чтение `AuthSession` по `x-auth-session-id`
+- `POST /api/auth/logout` теперь ревокает именно текущую auth-сессию, а не создает отдельную случайную `revoked` запись
+- frontend теперь сохраняет `auth.id` в `localStorage` и автоматически отправляет его в `x-auth-session-id` для последующих API-запросов
+- `GET /api/auth/session`, `GET /api/account`, admin/ops endpoints и route-feedback/probe flows теперь читают auth-контекст из конкретного запроса, а не из общего состояния процесса
+
+Зачем:
+
+- убрать критичный баг, при котором один пользователь мог фактически перетирать auth-состояние другого через общий backend-процесс
+- сделать многоклиентный и многовкладочный сценарий хотя бы базово корректным без немедленного внедрения полноценной cookie/session middleware
+- перевести auth-контур из dev-single-user допущения в состояние, которое не ломает базовую работоспособность продукта
+
+### Worker-specific alerts and hotspots in Ops
+
+Что сделали:
+
+- расширили `routeReprobeExecution` в `GET /api/ops/route-decisions`: summary теперь возвращает `workerAlerts` и `workerHotspots`, собранные по `workerId` из persisted attempt audit
+- `Ops` экран теперь показывает отдельные секции `Worker-specific alerts` и `Worker hotspots`, чтобы triage можно было начинать не с общего timeline, а сразу с проблемного worker-а
+- worker-specific слой теперь поднимает dead-letter, lease churn, stale running jobs и retry-heavy workers как отдельные explainable объекты
+- закрепили новый worker-specific summary unit-тестом рядом с существующим ops coverage
+
+Зачем:
+
+- закрыть roadmap-развилку про необходимость отдельного worker-specific surface не спором, а рабочим инкрементом
+- дать администратору быстрый ответ на вопрос "какой worker шумит" без ручной сверки всех timeline/job карточек
+- сдвинуть следующий шаг к ещё более focused drilldown только если этого summary всё ещё окажется недостаточно
+
+### Daily ops history and reprobe network hotspots
+
+Что сделали:
+
+- расширили `GET /api/ops/route-decisions`: `operationalSummary` теперь несет не только hourly history, но и агрегированный `dailyHistory`, а `routeReprobeExecution` получил `networkHotspots`
+- `Ops` экран теперь показывает отдельные секции `Daily ops history` и `Job network hotspots`, чтобы длиннее видеть динамику и быстрее находить сети, где одновременно копятся jobs и quality-сигналы
+- network hotspot drilldown связывает persisted reprobe jobs с feedback/fallback/degradation сигналами по той же network context группе
+- закрепили новый history/hotspot слой unit-тестом в `route-decision-ops` coverage
+
+Зачем:
+
+- сделать следующий ops/history шаг не просто "ещё больше карточек", а более удобным triage слоем для длительной динамики и проблемных сетей
+- дать админу быстрый ответ не только на вопрос "что сломалось сейчас", но и "в какой сети это копится уже дольше" без ручной сверки по event trail
+- перевести следующую roadmap-развилку к решению, нужен ли вообще отдельный worker-specific alert/drilldown surface
+
+### Worker timeline and failure drilldown for persisted jobs
+
+Что сделали:
+
+- расширили `routeReprobeExecution` в `GET /api/ops/route-decisions`: summary теперь возвращает flattened `timeline` по `attemptAudit` и grouped `failureDrilldown` по recurring failure keys
+- `Ops` экран теперь показывает отдельные секции `Worker timeline` и `Worker failure drilldown` поверх persisted jobs
+- recurring execution failures теперь читаются как explainable clusters (`boom`, `lease_expired_before_completion` и т.д.), а не как набор разрозненных audit entries
+- закрепили новый worker timeline/failure drilldown unit-тестом
+- синхронизировали `README`, `ROADMAP`, `DEV_SETUP` и `ARCHITECTURE` с тем, что следующий шаг roadmap теперь уже шире текущего timeline/history слоя
+
+Зачем:
+
+- дать ops/admin слою первый внятный chronology view по worker lifecycle без чтения raw JSON из `route_reprobe_jobs`
+- сделать recurring execution failures explainable и triage-friendly
+- перевести следующий шаг roadmap от "покажи timeline" к "нужна ли более длинная история и отдельный worker surface"
+
+### Compact hourly ops history
+
+Что сделали:
+
+- расширили `operationalSummary` внутри `GET /api/ops/route-decisions`: теперь он возвращает историю последних почасовых окон с feedback mix, fallback resolves и job lifecycle counts
+- `Ops` экран теперь показывает `Recent ops history`, чтобы видеть динамику по окнам, а не только текущий alert/summary срез
+- закрепили новый history drilldown unit-тестом в `route-decision-ops` coverage
+- обновили `README`, `ROADMAP`, `DEV_SETUP` и `ARCHITECTURE`, чтобы следующий шаг roadmap сместился уже к более длинной истории и ещё более глубоким drilldowns
+
+Зачем:
+
+- дать ops-слою первый temporal drilldown без отдельного timeline endpoint
+- сделать route-quality и worker execution наблюдаемыми не только в текущем моменте, но и в ближайшей динамике
+- подготовить базу под следующий шаг с ещё более длинной историей или отдельным history surface
+
+### Ops alerting and retention baseline
+
+Что сделали:
+
+- расширили `GET /api/ops/route-decisions`: summary теперь возвращает compact `operationalSummary` с `overallSeverity`, active alerts и retention windows для `probe_reports`, `route_events`, `route_reprobe_jobs`, rollups и rankings
+- alert layer теперь поднимает `watch/critical` сигналы поверх overdue queue, dead-letter jobs, SLA breaches и quality backlog после последнего успешного reprobe completion
+- `Ops` экран теперь показывает отдельный attention block, чтобы админ видел не только counters, но и что именно требует внимания прямо сейчас
+- зафиксировали retention и alert semantics в `DB_SCHEMA`, `ROADMAP`, `DEV_SETUP`, `ARCHITECTURE` и `README`
+- закрепили новый operational summary unit-тестом в существующем route-decision ops coverage
+
+Зачем:
+
+- закрыть roadmap-шаг про alerting/retention вокруг worker health и route-quality observation
+- дать ops-слою короткий attention summary без необходимости вручную читать все dashboards и event trail
+- перевести следующий шаг roadmap от базового alerting к более длинной истории и richer drilldowns
+
+### Job-level drilldowns and execution impact in Ops
+
+Что сделали:
+
+- расширили `GET /api/ops/route-decisions`: summary теперь возвращает `executionImpact`, который связывает worker execution с route-quality сигналами через `last successful completion`, свежие quality events, fallback resolves и деградировавшие сети
+- recent reprobe jobs в том же ops summary теперь несут более явный job-level drilldown: network quality impact по сети job, active degradation flag и candidate health context
+- обновили `Ops` экран, чтобы recent jobs было можно читать как decision-friendly drilldown без ручной сверки по raw `route_events`
+- синхронизировали `README`, `ROADMAP`, `DEV_SETUP` и `ARCHITECTURE`, чтобы ближайшая очередь теперь честно сместилась к alerting/retention, а не продолжала ссылаться на уже завершённый шаг
+- зафиксировали новый job-level drilldown unit-тестом рядом с существующим ops summary coverage
+
+Зачем:
+
+- закрыть roadmap-переход от "worker execution показывается рядом" к "worker execution объяснимо влияет на route-quality observation"
+- сделать следующий инкремент про alerting/retention осмысленным, опираясь уже на связанный ops trail, а не на разрозненные counters
+- держать документацию в состоянии, где она отражает текущий код, а не вчерашний план
+
 ### Worker execution observability in Ops
 
 Что сделали:
@@ -715,3 +928,22 @@
 - изменения dev-сетапа
 - подключение новых сервисов
 - переходы между этапами roadmap
+
+## 2026-07-07
+
+### Code review findings — исправлены расхождения документации с кодом
+
+Что сделано:
+- `frontend/types/route.ts` — `TelemetryNetworkContext` расширен до полного контракта бэка (networkType?, carrier?, asn?, countryCode?, region?)
+- `frontend/lib/network.ts` — `buildRouteContext()` теперь собирает `networkType` + `carrier`; `submitProbeReport()` шлёт `x-auth-session-id`
+- `frontend/types/session.ts` — `SessionResponse.servers` сделан `optional` (resp. `/api/connect`)
+- `frontend/hooks/useRouteSession.ts` — fallback `data.servers ?? []`
+- `frontend/src/App.tsx` — удалён дубликат `return`
+- `docs/CODE_REVIEW.md` — создан документ ревью с таблицей статусов
+- `docs/DEV_SETUP.md` — endpoint list синхронизирован с реальностью (25 endpoints)
+- `docs/ARCHITECTURE.md` — seedDefaultData описан как удалённый, добавлен withStateLock()
+- `docs/DECISIONS.md` — Decision 014/015 уточнены про удаление seed
+- `docs/README.md` — добавлена ссылка на CODE_REVIEW.md
+
+Зачем:
+- синхронизировать документацию с текущим состоянием кода, чтобы следующий разработчик не тратил время на расследования расхождений

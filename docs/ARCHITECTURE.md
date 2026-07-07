@@ -79,6 +79,13 @@ Backend отвечает за:
 - backend отдельно проверяет admin-доступ перед route observation и admin-management endpoint-ами
 - снятие admin-флага с последнего администратора запрещено, чтобы не потерять доступ к служебному контуру
 
+Важно для работоспособности:
+
+- auth-контекст больше не должен жить как process-global переменная backend-а
+- текущий dev-контур уже использует request-scoped `AuthSession` через `x-auth-session-id`
+- frontend хранит `auth.id` локально и отправляет его в каждый API-запрос
+- это не финальная cookie/session архитектура, но уже убирает самый опасный баг класса "один пользователь логинится за другого из-за общего состояния процесса"
+
 Для `email verification` и `Telegram auth` на dev-этапе уже выделен отдельный challenge-based слой:
 
 - `VerificationChallenge` хранится в `PostgreSQL`
@@ -116,8 +123,16 @@ DB-слой уже добавлен в кодовую базу:
 
 После внедрения DB-backed store стало заметно несколько проблем, которые были исправлены целенаправленным рефакторингом:
 
-**seedDefaultData() — однократный вызов**
-Ранее `seedDefaultData()` вызывался в начале почти каждого метода чтения/записи store, что давало 7 лишних DB-запросов (`upsert` демо user, subscription, device, auth-session, password-credential и двух endpoints) на каждый API-вызов. Исправление: вызов перенесён в конструктор store — один раз после создания, гарантированно до первого запроса. Это не меняет поведение для dev-стенда, но радикально снижает DB-нагрузку.
+После исправления этих проблем появилась ещё одна явная необходимость:
+
+**state mutation serialization — for race safety**
+В `backend/src/server.ts` добавлен promise-chain mutex `withStateLock()` для сериализации конкурентных мутаций module-level `state` объекта. Два одновременных `POST /api/connect` или `POST /api/server` не могут теперь прочитать stale `status` и записать расходящееся состояние. Обёрнуты все роуты, мутирующие `state` (`/api/connect`, `/api/server`, `PATCH /api/account/profile`).
+
+**writeState на старте сессии — исключён**
+Ранее при старте сессии `readState()` в некоторых путях вызывал `writeState()`, что создавало лишнюю запись в БД ещё до того, как пользователь что-то сделал. Этот вызов был исключён из startup-пути: `readState()` теперь только читает, `writeState()` вызывается только при осмысленных изменениях (connect, выбор сервера, обновление профиля).
+
+**seedDefaultData() — удалён после перехода на Prisma-миграции**
+Ранее `seedDefaultData()` вызывался в начале почти каждого метода чтения/записи store, что давало 7 лишних DB-запросов. При рефакторинге store seed был временно вынесен в конструктор, но позже удалён полностью — демо-данные живут только в Prisma-миграциях. На dev-стенде это не влияет на поведение, так как миграция `20260706170000_init` создаёт начальные строки.
 
 **Ranking: точечное обновление bucket вместо полной очистки**
 `recomputeAnalyticsForFingerprint()` удалял все `RouteRanking` записи для fingerprint перед пересчётом, что уничтожало исторические данные для трендов. Исправлено: `deleteMany` теперь фильтрует по `expiresAt: bucketEnd` — удаляется только текущий time window. Исторические свечи (прошлые часы/дни) сохраняются для аналитики и трендов.
@@ -150,6 +165,8 @@ backend/src/store/
 │                       recordRouteWorkflowSnapshot, getHealthSnapshots, getRankings
 └── admin.ts          (203 строки) — listAdminUsers, updateAdmin, getOpsSummary
 ```
+
+При разбиении модулей также был замечен дублирующийся `dynamic import` в `admin.ts`: функция `mapUserRowToAdminUserSummary` импортировалась дважды — статически (строка 21) и динамически (`await import("./utils.js")`). Динамический импорт удалён, функция используется из статического импорта.
 
 `state-store.ts` (82 строки) остаётся фасадом — только импортит модули и композирует их в единый `StateStore`.
 
@@ -387,15 +404,22 @@ network_fingerprint × endpoint_ip × protocol_profile × time_window
 - тот же слой теперь уже может demote-ить и исходный primary-кандидат, если penalty/confidence выглядят достаточно сильными по сравнению с соседним healthier endpoint
 - появился отдельный persisted workflow layer для фоновых `resolve/re-probe` jobs: `RouteReprobeJob`, admin-only enqueue/list endpoints, lease-aware worker execution и `runtime_reprobe_resolve` snapshot-события
 - сам execution worker теперь запускается отдельным процессом через `backend/src/worker.ts`, а API переиспользует общий `runtime.ts`, не держа polling loop внутри `server.ts`
+- **graceful shutdown** в `worker.ts`: при `SIGINT/SIGTERM` worker останавливается через `worker.stop()` + `await runtime.disconnect()`. `process.exit()` не используется — процесс завершается естественно после отсоединения от БД.
 - `GET /api/ops/route-decisions` теперь агрегирует не только route-quality observation, но и `routeReprobeExecution` summary: lifecycle, queue lag, worker activity, timing и recent job drilldown
+- тот же ops summary теперь уже добавляет `execution impact`: слой, который показывает, сколько quality-сигналов накопилось после последнего успешного reprobe completion и есть ли backlog/dead-letter jobs на деградировавших сетях
+- recent persisted jobs в том же summary теперь уже несут job-level drilldown: network quality impact после старта job, active degradation flag и candidate health context для quick triage
+- поверх этого summary теперь уже добавляет compact operational layer: active alerts, overall severity и retention windows для `probe_reports`, `route_events`, `route_reprobe_jobs`, rollups и rankings
+- тот же operational layer теперь уже включает compact hourly history, чтобы ops видел не только "что болит сейчас", но и как менялся feedback/execution mix в последних окнах
+- execution summary для persisted jobs теперь также отдает flattened `worker timeline` и grouped `failure drilldown` поверх `attemptAudit`, чтобы lifecycle и recurring failures были читаемы без ручной сборки из raw job JSON
+- поверх этих агрегатов execution summary теперь также выбирает `focusedDrilldowns.worker/network/job`: короткий triage-first слой над hotspots, failures и recent jobs
 - CI теперь идет отдельным последовательным контуром: `prisma generate -> migrate -> check -> test -> build`, чтобы не было конкуренции за `backend/src/generated/prisma`
 ```
 
 Следующий архитектурный слой после этого:
 
-1. связывать job-level execution signals с route-quality observation слоем
-2. после этого углублять ops/admin surface до более явных job-level drilldowns
-3. затем добавлять alerting/retention вокруг уже появившихся worker health metrics
+1. решать, нужен ли поверх текущего focused drilldown отдельный alert delivery path
+2. затем думать, стоит ли уводить часть ops/admin observation в ещё более специализированный surface
+3. сохранять focused drilldown explainable и построенным поверх уже существующего observation trail, а не через новую разрозненную логику
 
 Для architecture это означает:
 
@@ -406,6 +430,48 @@ network_fingerprint × endpoint_ip × protocol_profile × time_window
 - execution lifecycle внутри `route_reprobe_jobs` уже должен включать persisted `nextAttemptAt`, `maxAttempts`, stale-lease reclaim, `dead-letter` и attempt audit
 - API и worker теперь должны делить один runtime-контракт, а не две расходящиеся реализации resolve/execution logic
 - ops/admin слой уже должен уметь показывать рядом и route-quality metrics, и execution health самого background worker-а
+- retention policy и alert thresholds для текущего ops trail уже зафиксированы; history/drilldown слой тоже поднят, поэтому следующий полезный вопрос уже не "каких карточек не хватает", а "нужен ли отдельный delivery/specialized surface поверх текущего explainable summary"
+
+Для локального репозитория это лучше приземлить в такой архитектурный инкремент:
+
+- ввести persisted сущность уровня `ops alert`, собранную из уже существующих `route_events`, `route_reprobe_jobs` и execution/quality thresholds
+- отделить `alert detection` от `alert presentation`: summary продолжает быть read-model, а alerts получают собственный lifecycle (`active`, `acknowledged`, `resolved`, опционально `snoozed`)
+- первый delivery path должен быть внутренним: API + UI внутри текущего `Ops`, без обязательной внешней доставки
+- только после этого появится честная база для решения, нужен ли второй delivery layer через `Telegram/email/push`
+
+Предлагаемая реализация по слоям:
+
+1. **Prisma / storage**
+   новая таблица `OpsAlert` с dedupe-ключом и lifecycle-полями; raw execution/quality trail остается источником фактов, а `OpsAlert` становится persisted projection для triage
+2. **Detection layer**
+   отдельный модуль вида `ops-alerts` или `ops-alert-detector`, который принимает текущий ops snapshot / набор threshold inputs и решает, какой alert открыть, переоткрыть, обновить или закрыть
+3. **Store layer**
+   store отвечает за идемпотентный upsert alerts, transitions `acknowledge/snooze/resolve` и выборку feed-а
+4. **HTTP layer**
+   admin-only API не пересчитывает lifecycle на лету, а читает persisted alerts плюс вызывает explicit transitions
+5. **UI layer**
+   `Ops` показывает alerts как самостоятельный список triage-объектов, а summary/focused drilldown остаются explainable контекстом вокруг них
+
+Минимальный первый scope:
+
+- только internal delivery path
+- только ручные transitions из UI
+- только alerts, которые уже явно следуют из текущих thresholds: overdue queue, dead-letter jobs, stale running, SLA breaches, quality backlog
+
+Текущий статус:
+
+- storage baseline уже реализован через persisted `OpsAlert`
+- первый internal delivery path на backend уже поднят как admin API поверх materialized summary-alerts
+- frontend feed и lifecycle actions внутри текущего `Ops` уже реализованы
+- alert rules уже вынесены в отдельный detector module
+- persisted alert refresh уже дополнительно вынесен в worker/runtime contour, а не остаётся только частью summary-read path
+- поверх этого уже появился escalation preview layer: backend умеет посчитать recipients/channels для alert-а по admin contacts без прямой внешней отправки
+
+Что оставляем следующим этапам:
+
+- внешние delivery-каналы
+- escalation chains
+- расписания уведомлений, digest mode и multi-recipient routing
 
 ## 7. Frontend
 

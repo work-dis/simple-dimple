@@ -46,6 +46,8 @@
 - `GET /api/auth/session`
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `POST /api/auth/challenge`
+- `POST /api/auth/verify`
 - `POST /api/auth/logout`
 - `GET /api/account`
 - `PATCH /api/account/profile`
@@ -53,6 +55,17 @@
 - `PATCH /api/admin/users/:userId`
 - `POST /api/connect`
 - `POST /api/server`
+- `POST /api/routes/resolve`
+- `POST /api/routes/feedback`
+- `POST /api/telemetry/probe`
+- `GET /api/ops/route-decisions`
+- `GET /api/ops/route-reprobe-jobs`
+- `POST /api/ops/route-reprobe-jobs`
+- `GET /api/ops/alerts`
+- `POST /api/ops/alerts/:alertId/acknowledge`
+- `POST /api/ops/alerts/:alertId/snooze`
+- `POST /api/ops/alerts/:alertId/unacknowledge`
+- `GET /api/ops/alerts/:alertId/escalation-preview`
 
 Порт по умолчанию:
 
@@ -376,18 +389,60 @@ npm run db:wait
 - persisted worker execution теперь уже умеет `retry/backoff`, stale lease reclaim и `dead-letter` lifecycle
 - route-reprobe execution теперь уже реально вынесен в отдельный `backend/src/worker.ts`, а `npm run dev` поднимает API, worker и frontend раздельно
 - `Ops` теперь уже показывает и worker execution dashboard: lifecycle counts, queue lag, stale running jobs, timing и recent reprobe job drilldown
+- рядом с этим `Ops` теперь уже считает `execution impact`, чтобы связывать worker backlog/dead-letter состояние с route-quality сигналами
+- recent reprobe jobs теперь уже показывают network quality impact и candidate health context, а не только lifecycle attempt audit
+- поверх этого `Ops` теперь уже возвращает compact operational summary: active alerts, overall severity и retention windows для execution/quality trail
+- рядом с этим summary `Ops` теперь уже показывает compact hourly history по последним окнам наблюдения: feedback mix, fallback resolves и job lifecycle transitions
+- рядом с recent jobs `Ops` теперь уже показывает и отдельные `worker timeline` / `failure drilldown` секции по persisted attempt audit
+- поверх всех этих широких секций `Ops` теперь уже показывает и `Focused triage drilldown`: один выбранный `worker`, одну `network` и один `job trail` для быстрого старта расследования
 
 ## Что делаем дальше
 
 Ближайшая очередь разработки сейчас такая:
 
-1. плотнее связывать job-level execution signals с route-quality observation
-2. после этого усиливать ops-слой до более явных job-level drilldowns
-3. затем решать retention и alerting вокруг worker-specific health metrics
+1. решать, нужен ли поверх текущего focused drilldown отдельный alert delivery path
+2. затем уточнять, нужен ли ещё более специализированный ops surface вне текущего summary
+3. держать focused drilldown explainable и не раздувать его до второго dashboard-а
 
 Практически это значит:
 
 - сделать более явные retention-границы для `probe_reports`, `route_events` и агрегатов
 - начать переиспользовать сигналы похожих сетей без превращения ranking в непрозрачную магию
 - worker execution уже должен переживать ошибки через persisted `nextAttemptAt`, `maxAttempts`, reclaim просроченного lease и `dead-letter`
-- следующий шаг — связывать worker health/lag/audit метрики с влиянием на route-quality decisions, а не только показывать их отдельно
+- следующий шаг — решать, нужен ли отдельный delivery path для уже появившихся focused alerts/drilldowns
+
+Для локальной разработки это лучше трактовать так:
+
+- сначала делаем delivery path как внутренний persisted alert feed внутри текущего backend/frontend контура
+- acknowledge/snooze state тоже держим локально в БД, чтобы можно было тестировать lifecycle без внешних интеграций
+- внешние каналы доставки оставляем отдельным следующим шагом, если локальный alert feed действительно окажется полезным
+
+Практический порядок работ:
+
+1. Prisma migration под `OpsAlert`
+2. backend detector + store transitions
+3. admin endpoints
+4. `Ops` UI для списка и действий
+5. unit/integration coverage
+
+Минимальный локальный сценарий приемки:
+
+- сгенерировать деградационный сигнал через существующие `route_events` / `route_reprobe_jobs`
+- увидеть новый persisted alert в `GET /api/ops/alerts`
+- отметить его как `acknowledged` или `snoozed`
+- перезагрузить backend/UI и убедиться, что lifecycle сохранился
+
+Что уже сделано:
+
+- migration под `OpsAlert`
+- backend store transitions
+- admin endpoints для feed и lifecycle
+- `Ops` UI для списка и lifecycle actions
+- отдельный detector module для alert rules
+- фоновый refresh persisted alerts из worker/runtime контура, чтобы lifecycle не зависел только от `GET /api/ops/alerts`
+- escalation preview поверх admin contacts, чтобы triage уже видел, кому и по какому каналу ушёл бы alert
+
+Что остаётся следующим:
+
+- реальный delivery execution поверх уже работающего feed и escalation preview
+- при необходимости более явные escalation chains, если одного preview-слоя окажется мало
