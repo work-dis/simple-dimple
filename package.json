@@ -1,0 +1,27 @@
+{
+  "name": "simple-dimple",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "db:logs": "docker compose logs -f postgres",
+    "db:wait": "node --env-file=backend/.env backend/scripts/wait-for-db.mjs",
+    "db:migrate": "npm run prisma:migrate --workspace backend",
+    "dev": "npm run db:wait && concurrently -n backend,worker,frontend -c blue,yellow,green \"npm run dev --workspace backend\" \"npm run dev:worker --workspace backend\" \"npm run dev --workspace frontend\"",
+    "dev:backend": "npm run db:wait && npm run dev --workspace backend",
+    "dev:worker": "npm run db:wait && npm run dev:worker --workspace backend",
+    "dev:frontend": "npm run dev --workspace frontend",
+    "build": "npm run build --workspace backend && npm run build --workspace frontend",
+    "check": "npm run check --workspace backend && npm run check --workspace frontend",
+    "ci:check": "npm run check:ci --workspace backend && npm run check --workspace frontend",
+    "ci:build": "npm run build:ci --workspace backend && npm run build --workspace frontend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0"
+  }
+}

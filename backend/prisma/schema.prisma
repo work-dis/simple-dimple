@@ -1,0 +1,356 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SubscriptionStatus {
+  active
+  grace
+}
+
+enum ContactType {
+  telegram
+  email
+}
+
+enum UserStatus {
+  active
+  blocked
+  trial
+}
+
+enum AuthProvider {
+  credentials
+  telegram
+  email
+}
+
+enum AuthSessionStatus {
+  active
+  revoked
+  expired
+}
+
+enum VerificationChallengeStatus {
+  pending
+  consumed
+  expired
+}
+
+model AppSession {
+  id             String   @id
+  status         String
+  activeServerId String
+  updatedAt      DateTime
+  connectCount   Int
+}
+
+model ServerPool {
+  id          String     @id
+  code        String     @unique
+  provider    String
+  asn         Int?
+  countryCode String
+  region      String?
+  priority    Int
+  isActive    Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  endpoints   Endpoint[]
+}
+
+model Endpoint {
+  id               String     @id
+  serverPoolId     String
+  label            String
+  ipAddress        String
+  provider         String
+  asn              Int?
+  countryCode      String
+  city             String?
+  transportProfile String
+  protocol         String
+  latencyMs        Int
+  loadPercent      Int
+  isActive         Boolean    @default(true)
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+  serverPool       ServerPool @relation(fields: [serverPoolId], references: [id], onDelete: Cascade)
+  probeReports     ProbeReport[]
+  routeSuccessRollups RouteSuccessRollup[]
+  routeRankings    RouteRanking[]
+  userEndpointAssignments UserEndpointAssignment[]
+  lastKnownGoodRoutes LastKnownGoodRoute[]
+  routeEvents      RouteEvent[]
+
+  @@index([serverPoolId, isActive])
+  @@index([ipAddress])
+  @@index([asn, countryCode])
+}
+
+model User {
+  id            String         @id
+  displayName   String
+  contact       String
+  contactType   ContactType
+  isAdmin       Boolean        @default(false)
+  status        UserStatus
+  memberSince   DateTime
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  subscription  Subscription?
+  devices       Device[]
+  authSessions  AuthSession[]
+  probeReports  ProbeReport[]
+  routeEvents   RouteEvent[]
+  verificationChallenges VerificationChallenge[]
+  passwordCredential PasswordCredential?
+  userEndpointAssignments UserEndpointAssignment[]
+  lastKnownGoodRoutes LastKnownGoodRoute[]
+}
+
+model Subscription {
+  id         String             @id
+  userId     String             @unique
+  plan       String
+  renewalDate DateTime
+  status     SubscriptionStatus
+  autoRenew  Boolean
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+  user       User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Device {
+  id         String   @id
+  userId     String
+  name       String
+  platform   String
+  lastSeenAt DateTime
+  isCurrent  Boolean
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  probeReports ProbeReport[]
+  routeEvents RouteEvent[]
+  userEndpointAssignments UserEndpointAssignment[]
+  lastKnownGoodRoutes LastKnownGoodRoute[]
+
+  @@index([userId])
+}
+
+model UserEndpointAssignment {
+  id               String    @id
+  userId           String
+  deviceId         String?
+  endpointId       String
+  assignmentReason String
+  assignedAt       DateTime
+  expiresAt        DateTime?
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device           Device?   @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  endpoint         Endpoint  @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([userId, assignedAt(sort: Desc)])
+  @@index([deviceId, assignedAt(sort: Desc)])
+  @@index([endpointId, assignedAt(sort: Desc)])
+}
+
+model LastKnownGoodRoute {
+  id                     String              @id
+  userId                 String
+  deviceId               String?
+  networkFingerprintId   String?
+  endpointId             String
+  sourceAssignmentReason String?
+  lastSucceededAt        DateTime
+  expiresAt              DateTime?
+  createdAt              DateTime            @default(now())
+  user                   User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device                 Device?             @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  networkFingerprint     NetworkFingerprint? @relation(fields: [networkFingerprintId], references: [id], onDelete: SetNull)
+  endpoint               Endpoint            @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([userId, lastSucceededAt(sort: Desc)])
+  @@index([userId, networkFingerprintId, lastSucceededAt(sort: Desc)])
+  @@index([endpointId, lastSucceededAt(sort: Desc)])
+}
+
+model AuthSession {
+  id                  String            @id
+  userId              String?
+  provider            AuthProvider
+  status              AuthSessionStatus
+  lastAuthenticatedAt DateTime?
+  expiresAt           DateTime?
+  revokedAt           DateTime?
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+  user                User?             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+}
+
+model PasswordCredential {
+  id           String   @id
+  userId       String   @unique
+  login        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationChallenge {
+  id          String                      @id
+  userId      String?
+  provider    AuthProvider
+  target      String
+  codeHash    String
+  status      VerificationChallengeStatus
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime                    @default(now())
+  updatedAt   DateTime                    @updatedAt
+  user        User?                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([provider, target, status])
+  @@index([userId, status])
+}
+
+model NetworkFingerprint {
+  id              String        @id
+  fingerprintHash String        @unique
+  networkType     String?
+  carrier         String?
+  asn             Int?
+  countryCode     String?
+  region          String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  probeReports    ProbeReport[]
+  routeSuccessRollups RouteSuccessRollup[]
+  routeRankings   RouteRanking[]
+  lastKnownGoodRoutes LastKnownGoodRoute[]
+  routeEvents     RouteEvent[]
+}
+
+model RouteReprobeJob {
+  id                    String   @id
+  status                String
+  context               Json
+  note                  String?
+  appVersion            String?
+  candidateLimit        Int
+  maxAttempts           Int      @default(3)
+  results               Json
+  recommendedEndpointId String?
+  candidates            Json
+  recordedResultsCount  Int      @default(0)
+  failureMessage        String?
+  nextAttemptAt         DateTime?
+  attempts              Int      @default(0)
+  leaseReclaimedCount   Int      @default(0)
+  startedAt             DateTime?
+  completedAt           DateTime?
+  deadLetteredAt        DateTime?
+  leaseExpiresAt        DateTime?
+  workerId              String?
+  attemptAudit          Json     @default("[]")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([status, nextAttemptAt])
+  @@index([leaseExpiresAt])
+  @@index([createdAt(sort: Desc)])
+}
+
+model ProbeReport {
+  id                   String             @id
+  userId               String?
+  deviceId             String?
+  networkFingerprintId String?
+  endpointId           String?
+  transportProfile     String
+  result               String
+  failureReason        String?
+  latencyMs            Int?
+  bytesSent            BigInt?
+  bytesReceived        BigInt?
+  appVersion           String?
+  testedAt             DateTime
+  receivedAt           DateTime           @default(now())
+  user                 User?              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device               Device?            @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  networkFingerprint   NetworkFingerprint? @relation(fields: [networkFingerprintId], references: [id], onDelete: SetNull)
+  endpoint             Endpoint?          @relation(fields: [endpointId], references: [id], onDelete: SetNull)
+
+  @@index([testedAt(sort: Desc)])
+  @@index([endpointId, testedAt(sort: Desc)])
+  @@index([networkFingerprintId, testedAt(sort: Desc)])
+  @@index([result, testedAt(sort: Desc)])
+  @@index([failureReason, testedAt(sort: Desc)])
+}
+
+model RouteEvent {
+  id                   String              @id
+  userId               String?
+  deviceId             String?
+  networkFingerprintId String?
+  endpointId           String?
+  transportProfile     String
+  eventType            String
+  feedbackResult       String?
+  eventReason          String?
+  metadata             Json
+  occurredAt           DateTime
+  receivedAt           DateTime            @default(now())
+  user                 User?               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device               Device?             @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  networkFingerprint   NetworkFingerprint? @relation(fields: [networkFingerprintId], references: [id], onDelete: SetNull)
+  endpoint             Endpoint?           @relation(fields: [endpointId], references: [id], onDelete: SetNull)
+
+  @@index([occurredAt(sort: Desc)])
+  @@index([endpointId, occurredAt(sort: Desc)])
+  @@index([networkFingerprintId, occurredAt(sort: Desc)])
+  @@index([eventType, occurredAt(sort: Desc)])
+}
+
+model RouteSuccessRollup {
+  id                   String              @id
+  timeBucketStart      DateTime
+  timeBucketEnd        DateTime
+  networkFingerprintId String?
+  endpointId           String?
+  transportProfile     String
+  successRate          Decimal             @db.Decimal(5, 4)
+  medianConnectTimeMs  Int?
+  disconnectRate       Decimal?            @db.Decimal(5, 4)
+  sampleCount          Int
+  computedAt           DateTime
+  networkFingerprint   NetworkFingerprint? @relation(fields: [networkFingerprintId], references: [id], onDelete: SetNull)
+  endpoint             Endpoint?           @relation(fields: [endpointId], references: [id], onDelete: SetNull)
+
+  @@index([endpointId, transportProfile, timeBucketEnd(sort: Desc)])
+  @@index([networkFingerprintId, timeBucketEnd(sort: Desc)])
+}
+
+model RouteRanking {
+  id                   String              @id
+  networkFingerprintId String?
+  endpointId           String?
+  transportProfile     String
+  score                Decimal             @db.Decimal(8, 4)
+  rankPosition         Int
+  computedAt           DateTime
+  expiresAt            DateTime?
+  networkFingerprint   NetworkFingerprint? @relation(fields: [networkFingerprintId], references: [id], onDelete: SetNull)
+  endpoint             Endpoint?           @relation(fields: [endpointId], references: [id], onDelete: SetNull)
+
+  @@index([networkFingerprintId, rankPosition])
+}

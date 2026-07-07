@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "codex/**"
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: simple_dimple
+          POSTGRES_USER: simpledimple
+          POSTGRES_PASSWORD: change-me
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U simpledimple -d simple_dimple"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://simpledimple:change-me@localhost:5432/simple_dimple?schema=public
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm run prisma:generate --workspace backend
+
+      - name: Apply Prisma migrations
+        run: npm run prisma:migrate --workspace backend
+
+      - name: Run checks
+        run: npm run ci:check
+
+      - name: Run backend tests
+        run: npm run test --workspace backend
+
+      - name: Build workspaces
+        run: npm run ci:build

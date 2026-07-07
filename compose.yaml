@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: simple-dimple-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: simple_dimple
+      POSTGRES_USER: simpledimple
+      POSTGRES_PASSWORD: change-me
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U simpledimple -d simple_dimple"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  route-reprobe-worker:
+    image: node:22-alpine
+    container_name: simple-dimple-route-reprobe-worker
+    profiles: ["worker"]
+    working_dir: /workspace
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://simpledimple:change-me@postgres:5432/simple_dimple
+    volumes:
+      - ./:/workspace
+    command: sh -c "npm install && npm run prisma:generate --workspace backend && npm run start:worker --workspace backend"
+
+volumes:
+  postgres_data:
