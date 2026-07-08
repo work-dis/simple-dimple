@@ -10,6 +10,50 @@
 
 ## 2026-07-08
 
+### Этап 2b: JS-сторона native tunnel plugin подключена к connect-flow; Kotlin-скелет доработан (код без сборки)
+
+Что сделали:
+
+- окружение сессии не имеет Android SDK/Gradle (`adb`/`sdkmanager`/`gradle`
+  отсутствуют) и Docker-демон не запущен — реальную сборку/проверку `android/`
+  и live SOCKS-туннель через REALITY в этой среде продолжить нельзя; по
+  явному выбору продолжили писать код Этапа 2b без сборки
+- добавили `@capacitor/core` в зависимости `frontend/` (безопасно в браузере:
+  `Capacitor.isNativePlatform()` возвращает `false` вне нативной оболочки)
+- новый [frontend/src/lib/vpnTunnel.ts](../frontend/src/lib/vpnTunnel.ts) —
+  `registerPlugin<VpnTunnelPlugin>("VpnTunnel")` и best-effort
+  `connectNativeTunnel`/`disconnectNativeTunnel`, которые в браузере всегда
+  no-op, а в native-оболочке не бросают исключение в основной flow при ошибке
+- [frontend/src/hooks/useRouteSession.ts](../frontend/src/hooks/useRouteSession.ts) —
+  `toggleConnection()` и `changeServer()` теперь вызывают нативный туннель
+  сразу после получения `connectionConfig` от backend; `session.status`
+  остаётся источником истины (Decision 021), нативная ошибка идёт в `onError`
+  отдельным сообщением, не блокируя control-plane flow
+- убрали дублирующий `mobile/src/plugins/vpn-tunnel.ts` — JS-плагин живёт
+  только во `frontend/`, потому что именно `frontend/dist` Capacitor
+  бандлит как `webDir` ([mobile/capacitor.config.ts](../mobile/capacitor.config.ts))
+- [mobile/android-skeleton/VpnTunnelPlugin.kt](../mobile/android-skeleton/VpnTunnelPlugin.kt) —
+  `connect()` теперь парсит `config.params` и валидирует обязательные поля,
+  корректно реализует `VpnService.prepare()` consent-flow через Capacitor
+  `startActivityForResult`/`@ActivityCallback`; вызов Xray core внутри
+  `startTunnel()` остался `TODO` — выбор конкретной mobile-библиотеки Xray
+  core сознательно не сделан здесь
+- обновили [mobile/README.md](../mobile/README.md) и
+  [PRIORITY_PLAN.md, Этап 2b](PRIORITY_PLAN.md) явным статусом: что сделано
+  без сборки, что заблокировано средой, что нужно сделать первым делом при
+  появлении Android-тулинга (начать со сборки `android/`, чтобы проверить
+  Kotlin-скелет, который пока не компилировался)
+
+Зачем:
+
+- [PRIORITY_PLAN.md, Шаг 2, Этап 2b, п.2](PRIORITY_PLAN.md) требует, чтобы
+  кнопка "Подключить" реально запускала туннель на устройстве — без Android
+  SDK нельзя закрыть это целиком, но JS-сторону интеграции (п.5 из
+  `mobile/README.md`) можно было сделать и проверить typecheck'ом уже сейчас,
+  не дожидаясь тулинга
+- честно зафиксировать, что осталось непроверенным (весь Kotlin-код,
+  реальный Xray core), а не выдавать черновик за готовую реализацию
+
 ### Security hardening auth-поверхности: авторизация data-plane, срок жизни сессий, стойкий OTP, CORS
 
 Что сделали (backend):

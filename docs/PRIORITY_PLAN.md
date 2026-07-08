@@ -120,6 +120,29 @@
 3. Проверка вручную на реальном устройстве: публичный IP меняется, трафик
    реально идёт через туннель.
 
+**Статус (2026-07-08):** окружение для сборки (Android SDK/Gradle) в текущей
+dev-среде отсутствует — п.1 (`npx cap add android`) и п.3 (проверка на
+устройстве) физически недоступны здесь, см. [mobile/README.md](../mobile/README.md).
+Сделано в рамках "код без сборки":
+
+- `mobile/capacitor.config.ts`, `mobile/package.json` — Capacitor-проект
+  (не в workspaces, не участвует в build/check backend+frontend)
+- `mobile/android-skeleton/VpnTunnelPlugin.kt` — Kotlin-скелет плагина:
+  парсинг `config.params`, корректный `VpnService.prepare()` consent-flow
+  через Capacitor `startActivityForResult`/`@ActivityCallback`; сам вызов
+  Xray core (`startTunnel()`) и `SimpleDimpleVpnService` — TODO, ждут выбора
+  конкретной mobile-библиотеки Xray core; код не компилировался (нет
+  Kotlin/Gradle-тулинга в этой среде), нужна первая же сборка `android/`
+  для проверки
+- п.2 со стороны JS уже сделан: `frontend/src/lib/vpnTunnel.ts`
+  (`registerPlugin("VpnTunnel")`, `Capacitor.isNativePlatform()`-guard) +
+  `frontend/src/hooks/useRouteSession.ts` (`toggleConnection`/`changeServer`
+  вызывают `connectNativeTunnel`/`disconnectNativeTunnel` при получении
+  `connectionConfig`). JS-плагин живёт в `frontend/`, а не в `mobile/`, —
+  Capacitor бандлит `frontend/dist` как `webDir`
+- в browser-only PWA это всегда no-op (`isNativePlatform()` → `false`),
+  существующий connect-flow не затронут — подтверждено frontend `typecheck`
+
 ### Definition of done для Шага 2
 
 - есть минимум один живой сервер с рабочим VLESS+REALITY inbound;

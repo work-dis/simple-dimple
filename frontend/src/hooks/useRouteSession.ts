@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { HttpError, readJson } from "../lib";
+import { HttpError, connectNativeTunnel, disconnectNativeTunnel, isNativeTunnelAvailable, readJson } from "../lib";
 import { buildRouteContext, submitProbeReport } from "../lib/network";
 import type {
   ConnectionConfigSummary,
@@ -31,6 +31,23 @@ export function useRouteSession({
     useState<ConnectionConfigSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Best-effort native tunnel side effect (Этап 2b, PRIORITY_PLAN.md). Backend
+  // session.status stays the source of truth (Decision 021) — in the plain PWA
+  // this is always a no-op (isNativeTunnelAvailable() is false), so it never
+  // affects the existing browser-only connect/disconnect flow.
+  async function applyNativeTunnel(status: Session["status"], config: ConnectionConfigSummary | null) {
+    if (!isNativeTunnelAvailable()) {
+      return;
+    }
+
+    const result =
+      status === "connected" && config ? await connectNativeTunnel(config) : await disconnectNativeTunnel();
+
+    if (!result.ok) {
+      onError(`Native VPN tunnel: ${result.error}`);
+    }
+  }
 
   // Data-plane эндпоинты (/api/session, /api/connect, /api/server) теперь требуют
   // аутентификацию, поэтому signed-out состояние — это не ошибка, а пустой сброс.
@@ -86,6 +103,7 @@ export function useRouteSession({
       setRouteHealth(data.routeHealth);
       setRoutePolicy(data.routePolicy);
       setConnectionConfig(data.connectionConfig ?? null);
+      await applyNativeTunnel(data.session.status, data.connectionConfig ?? null);
 
       if (data.session.status === "connected") {
         const nextServer = servers.find((server) => server.id === data.session.activeServerId);
@@ -121,6 +139,10 @@ export function useRouteSession({
       setConnectionConfig(data.connectionConfig ?? null);
 
       if (data.session.status === "connected") {
+        // Переключение сервера во время активного подключения: поднимаем туннель
+        // заново с конфигом нового endpoint-а вместо того, чтобы оставить
+        // нативную сторону с устаревшим VLESS-конфигом.
+        await applyNativeTunnel(data.session.status, data.connectionConfig ?? null);
         const nextServer = servers.find((server) => server.id === serverId);
         if (nextServer) void submitProbeReport(nextServer);
       }
