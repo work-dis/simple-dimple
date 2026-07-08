@@ -81,8 +81,10 @@ type RouteReprobeQueueDependencies = {
     recordedResultsCount: number;
   }) => Promise<void>;
   failJob: (input: { jobId: string; message: string }) => Promise<void>;
+  refreshOpsAlerts?: () => Promise<void>;
   leaseMs?: number;
   pollIntervalMs?: number;
+  opsAlertRefreshIntervalMs?: number;
 };
 
 export function normalizeRouteReprobeCandidateLimit(input?: number) {
@@ -93,10 +95,12 @@ export function createRouteReprobeWorker(deps: RouteReprobeQueueDependencies) {
   const workerId = randomUUID();
   const leaseMs = deps.leaseMs ?? defaultLeaseMs;
   const pollIntervalMs = deps.pollIntervalMs ?? defaultPollIntervalMs;
+  const opsAlertRefreshIntervalMs = deps.opsAlertRefreshIntervalMs ?? 60_000;
 
   let timer: NodeJS.Timeout | null = null;
   let running = false;
   let started = false;
+  let lastOpsAlertRefreshAt = 0;
 
   const schedule = (delayMs: number) => {
     if (!started) {
@@ -171,6 +175,29 @@ export function createRouteReprobeWorker(deps: RouteReprobeQueueDependencies) {
     }
   };
 
+  const maybeRefreshOpsAlerts = async (force = false) => {
+    if (!deps.refreshOpsAlerts) {
+      return false;
+    }
+
+    const now = Date.now();
+    if (!force && now - lastOpsAlertRefreshAt < opsAlertRefreshIntervalMs) {
+      return false;
+    }
+
+    try {
+      await deps.refreshOpsAlerts();
+      lastOpsAlertRefreshAt = now;
+      return true;
+    } catch (error) {
+      console.error(
+        "[route-reprobe-worker] ops alert refresh failed",
+        error instanceof Error ? error.message : error
+      );
+      return false;
+    }
+  };
+
   const runOnce = async () => {
     if (running) {
       return false;
@@ -180,10 +207,12 @@ export function createRouteReprobeWorker(deps: RouteReprobeQueueDependencies) {
     try {
       const job = await deps.claimNextJob({ workerId, leaseMs });
       if (!job) {
+        await maybeRefreshOpsAlerts();
         return false;
       }
 
       await runJob(job);
+      await maybeRefreshOpsAlerts(true);
       return true;
     } finally {
       running = false;

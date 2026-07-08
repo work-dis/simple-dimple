@@ -280,14 +280,14 @@ function CodeAuthForm({
       </button>
       {activeChallenge ? (
         <strong>
-          Dev-код: {activeChallenge.code} · действует до{" "}
+          Код отправлен на {activeChallenge.target} · действует до{" "}
           {new Date(activeChallenge.expiresAt).toLocaleTimeString("ru-RU", {
             hour: "2-digit",
             minute: "2-digit",
           })}
         </strong>
       ) : (
-        <strong>Для локального стенда код показывается прямо в интерфейсе.</strong>
+        <strong>Код придёт на email или в Telegram.</strong>
       )}
       <label className="fieldLabel" htmlFor="challenge-code-input">
         Код подтверждения

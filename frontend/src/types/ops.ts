@@ -68,11 +68,161 @@ export type RouteDecisionOpsFailureDomainRecovery = {
   lastRecoveredAt: string | null;
 };
 
+export type RouteDecisionExecutionImpact = {
+  attentionLevel: "stable" | "watch" | "critical";
+  lastSuccessfulCompletionAt: string | null;
+  minutesSinceLastSuccessfulCompletion: number | null;
+  qualityEventsSinceLastSuccessfulCompletion: number;
+  fallbackResolvesSinceLastSuccessfulCompletion: number;
+  degradationStartsSinceLastSuccessfulCompletion: number;
+  activeDegradedNetworks: number;
+  queuedOrRunningJobsOnActiveDegradedNetworks: number;
+  deadLetterJobsOnActiveDegradedNetworks: number;
+};
+
+export type RouteDecisionOpsAlert = {
+  id: string;
+  severity: "watch" | "critical";
+  title: string;
+  detail: string;
+};
+
+export type OpsAlertSeverity = "watch" | "critical";
+export type OpsAlertStatus = "active" | "acknowledged" | "snoozed" | "resolved";
+
+export type OpsAlertSummary = {
+  id: string;
+  alertType: string;
+  severity: OpsAlertSeverity;
+  status: OpsAlertStatus;
+  dedupeKey: string;
+  title: string;
+  detail: string;
+  metadata: Record<string, unknown>;
+  startedAt: string;
+  lastDetectedAt: string;
+  acknowledgedAt: string | null;
+  resolvedAt: string | null;
+  snoozedUntil: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type OpsAlertEscalationChannel = "telegram" | "email";
+export type OpsAlertEscalationLevel = "none" | "digest" | "immediate";
+export type OpsAlertDeliveryStatus = "delivered" | "failed";
+
+export type OpsAlertEscalationRecipient = {
+  userId: string;
+  displayName: string;
+  contact: string;
+  channel: OpsAlertEscalationChannel;
+  escalationTier: "primary" | "secondary";
+  chainStep: number;
+  reason: string;
+};
+
+export type OpsAlertEscalationPreview = {
+  alertId: string;
+  alertStatus: OpsAlertStatus;
+  alertSeverity: OpsAlertSeverity;
+  escalationLevel: OpsAlertEscalationLevel;
+  shouldEscalate: boolean;
+  reason: string;
+  recipients: OpsAlertEscalationRecipient[];
+  recommendedSubject: string;
+  recommendedMessage: string;
+  generatedAt: string;
+};
+
+export type OpsAlertDeliverySummary = {
+  id: string;
+  alertId: string;
+  batchId: string;
+  channel: OpsAlertEscalationChannel;
+  escalationLevel: OpsAlertEscalationLevel;
+  status: OpsAlertDeliveryStatus;
+  recipientUserId: string | null;
+  recipientDisplayName: string;
+  recipientContact: string;
+  subject: string;
+  message: string;
+  reason: string;
+  deliveryPath: string;
+  providerMessageId: string | null;
+  actorUserId: string | null;
+  deliveredAt: string | null;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RouteDecisionOpsRetentionPolicy = {
+  probeReportsDays: number;
+  routeEventsDays: number;
+  routeReprobeJobsDays: number;
+  routeSuccessRollupsDays: number;
+  routeRankingsDays: number;
+};
+
+export type RouteDecisionOpsHistoryWindow = {
+  startedAt: string;
+  endedAt: string;
+  severity: "ok" | "watch" | "critical";
+  feedbackEvents: number;
+  connectedCount: number;
+  unstableCount: number;
+  failedCount: number;
+  fallbackResolves: number;
+  queuedJobs: number;
+  completedJobs: number;
+  deadLetterJobs: number;
+};
+
+export type RouteDecisionOpsDailyHistoryWindow = {
+  startedAt: string;
+  endedAt: string;
+  severity: "ok" | "watch" | "critical";
+  hourlyWindows: number;
+  feedbackEvents: number;
+  connectedCount: number;
+  unstableCount: number;
+  failedCount: number;
+  fallbackResolves: number;
+  queuedJobs: number;
+  completedJobs: number;
+  deadLetterJobs: number;
+};
+
+export type RouteDecisionOpsInventoryHealth = {
+  riskLevel: "ok" | "watch" | "critical";
+  activeEndpoints: number;
+  distinctProviders: number;
+  distinctAsns: number;
+  distinctPools: number;
+  distinctRegions: number;
+  largestRegionalDomainSize: number;
+  minimumRecommendedFailureDomains: number;
+  failedDimensions: string[];
+  policyViolationMessage: string | null;
+};
+
+export type RouteDecisionOpsOperationalSummary = {
+  overallSeverity: "ok" | "watch" | "critical";
+  activeAlertCount: number;
+  alerts: RouteDecisionOpsAlert[];
+  inventoryHealth: RouteDecisionOpsInventoryHealth;
+  retention: RouteDecisionOpsRetentionPolicy;
+  history: RouteDecisionOpsHistoryWindow[];
+  dailyHistory: RouteDecisionOpsDailyHistoryWindow[];
+};
+
 export type RouteDecisionQualityMetrics = {
   fallbackPressure: RouteDecisionOpsFallbackPressure;
   degradationWindows: RouteDecisionOpsDegradationWindows;
   recoveryTime: RouteDecisionOpsRecoveryTime;
   slaWindows: RouteDecisionOpsSlaWindows;
+  executionImpact: RouteDecisionExecutionImpact;
   providerPressure: RouteDecisionOpsFailureDomainPressure[];
   asnPressure: RouteDecisionOpsFailureDomainPressure[];
   recoveryByFailureDomain: RouteDecisionOpsFailureDomainRecovery[];
@@ -220,6 +370,98 @@ export type RouteReprobeJobOpsSummary = {
   lifecycleMinutes: number | null;
   latestAttemptAt: string | null;
   latestAttemptEvent: RouteReprobeJobAttemptAuditEntry["event"] | null;
+  qualityImpact: {
+    feedbackEventsOnJobNetwork: number;
+    connectedCountOnJobNetwork: number;
+    unstableCountOnJobNetwork: number;
+    failedCountOnJobNetwork: number;
+    fallbackResolvesOnJobNetwork: number;
+    degradationStartsOnJobNetwork: number;
+    activeDegradationOnJobNetwork: boolean;
+    dominantFailureReasonOnJobNetwork: TelemetryFailureReason | null;
+    latestQualityEventAt: string | null;
+  };
+};
+
+export type RouteReprobeExecutionTimelineEntry = {
+  at: string;
+  jobId: string;
+  jobStatus: "queued" | "running" | "completed" | "failed" | "dead_letter";
+  attempt: number;
+  event: RouteReprobeJobAttemptAuditEntry["event"];
+  workerId: string | null;
+  message: string | null;
+  network: {
+    networkType?: string;
+    carrier?: string;
+    asn?: number;
+    countryCode?: string;
+    region?: string;
+  };
+};
+
+export type RouteReprobeExecutionFailureDrilldown = {
+  failureKey: string;
+  latestAt: string;
+  affectedJobs: number;
+  deadLetterJobs: number;
+  retryScheduledCount: number;
+  failedEventCount: number;
+  leaseReclaimedCount: number;
+  sampleJobIds: string[];
+};
+
+export type RouteReprobeExecutionNetworkHotspot = {
+  networkKey: string;
+  network: {
+    networkType?: string;
+    carrier?: string;
+    asn?: number;
+    countryCode?: string;
+    region?: string;
+  };
+  totalJobs: number;
+  queuedJobs: number;
+  runningJobs: number;
+  completedJobs: number;
+  deadLetterJobs: number;
+  activeDegradation: boolean;
+  activeDegradationMinutes: number | null;
+  feedbackEvents: number;
+  connectedCount: number;
+  unstableCount: number;
+  failedCount: number;
+  fallbackResolves: number;
+  latestJobAt: string | null;
+  latestQualityEventAt: string | null;
+  dominantFailureReason: TelemetryFailureReason | null;
+  sampleJobIds: string[];
+};
+
+export type RouteReprobeExecutionWorkerAlert = {
+  id: string;
+  severity: "watch" | "critical";
+  workerId: string;
+  title: string;
+  detail: string;
+  latestActivityAt: string | null;
+};
+
+export type RouteReprobeExecutionWorkerHotspot = {
+  workerId: string;
+  activeJobs: number;
+  claimedJobs: number;
+  completedJobs: number;
+  deadLetterJobs: number;
+  retryScheduledCount: number;
+  failedEventCount: number;
+  leaseReclaimedCount: number;
+  staleRunningJobs: number;
+  latestActivityAt: string | null;
+  lastClaimedAt: string | null;
+  lastCompletedAt: string | null;
+  sampleJobIds: string[];
+  failureKeys: string[];
 };
 
 export type RouteReprobeExecutionSummary = {
@@ -227,12 +469,65 @@ export type RouteReprobeExecutionSummary = {
   timing: RouteReprobeExecutionTiming;
   workerHealth: RouteReprobeWorkerHealth;
   recentJobs: RouteReprobeJobOpsSummary[];
+  timeline: RouteReprobeExecutionTimelineEntry[];
+  failureDrilldown: RouteReprobeExecutionFailureDrilldown[];
+  networkHotspots: RouteReprobeExecutionNetworkHotspot[];
+  workerAlerts: RouteReprobeExecutionWorkerAlert[];
+  workerHotspots: RouteReprobeExecutionWorkerHotspot[];
+  focusedDrilldowns: {
+    worker: {
+      workerId: string;
+      latestActivityAt: string | null;
+      activeAlertCount: number;
+      activeJobs: number;
+      deadLetterJobs: number;
+      staleRunningJobs: number;
+      retryScheduledCount: number;
+      failedEventCount: number;
+      leaseReclaimedCount: number;
+      sampleJobIds: string[];
+      recentTimeline: RouteReprobeExecutionTimelineEntry[];
+      relatedFailures: RouteReprobeExecutionFailureDrilldown[];
+    } | null;
+    network: {
+      networkKey: string;
+      network: {
+        networkType?: string;
+        carrier?: string;
+        asn?: number;
+        countryCode?: string;
+        region?: string;
+      };
+      queuedOrRunningJobs: number;
+      deadLetterJobs: number;
+      activeDegradation: boolean;
+      activeDegradationMinutes: number | null;
+      feedbackEvents: number;
+      connectedCount: number;
+      unstableCount: number;
+      failedCount: number;
+      fallbackResolves: number;
+      dominantFailureReason: TelemetryFailureReason | null;
+      latestJobAt: string | null;
+      latestQualityEventAt: string | null;
+      sampleJobIds: string[];
+      recentTimeline: RouteReprobeExecutionTimelineEntry[];
+      relatedJobs: RouteReprobeJobOpsSummary[];
+    } | null;
+    job: {
+      job: RouteReprobeJobOpsSummary;
+      relatedWorkerIds: string[];
+      attemptTrail: RouteReprobeExecutionTimelineEntry[];
+      relatedFailures: RouteReprobeExecutionFailureDrilldown[];
+    } | null;
+  };
 };
 
 export type RouteDecisionOpsSummary = {
   generatedAt: string;
   windowHours: number;
   totals: RouteDecisionOpsTotals;
+  operationalSummary: RouteDecisionOpsOperationalSummary;
   qualityMetrics: RouteDecisionQualityMetrics;
   routeReprobeExecution: RouteReprobeExecutionSummary;
   endpoints: RouteDecisionOpsEndpointSummary[];
@@ -242,4 +537,33 @@ export type RouteDecisionOpsSummary = {
 
 export type RouteDecisionOpsResponse = {
   ops: RouteDecisionOpsSummary;
+};
+
+export type OpsAlertsResponse = {
+  alerts: OpsAlertSummary[];
+};
+
+export type UpdateOpsAlertResponse = {
+  alert: OpsAlertSummary;
+};
+
+export type OpsAlertEscalationPreviewResponse = {
+  preview: OpsAlertEscalationPreview;
+};
+
+export type OpsAlertDeliveriesResponse = {
+  deliveries: OpsAlertDeliverySummary[];
+};
+
+export type DeliverOpsAlertResponse = {
+  alert: OpsAlertSummary;
+  preview: OpsAlertEscalationPreview;
+  deliveries: OpsAlertDeliverySummary[];
+};
+
+export type DeliverOpsAlertDigestResponse = {
+  alerts: OpsAlertSummary[];
+  deliveries: OpsAlertDeliverySummary[];
+  batchId: string;
+  subject: string;
 };

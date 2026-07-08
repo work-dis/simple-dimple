@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { RouteReprobeJob } from "../../generated/prisma/client.js";
 import { buildRouteDecisionOpsSummary } from "../admin.js";
+import { detectOpsAlertsFromSummary } from "../ops-alert-detector.js";
 
 type OpsEvent = Parameters<typeof buildRouteDecisionOpsSummary>[0]["routeEvents"][number];
 
@@ -150,6 +151,13 @@ describe("buildRouteDecisionOpsSummary", () => {
           id: "job-queued",
           status: "queued",
           createdAt: new Date("2026-07-07T12:00:00.000Z"),
+          context: {
+            networkType: "wifi",
+            carrier: "Carrier One",
+            asn: 64500,
+            countryCode: "PL",
+            region: "Mazowieckie"
+          },
           nextAttemptAt: new Date("2026-07-07T12:05:00.000Z"),
           attempts: 1,
           updatedAt: new Date("2026-07-07T12:05:00.000Z"),
@@ -293,6 +301,85 @@ describe("buildRouteDecisionOpsSummary", () => {
       resolvedWindows: 0,
       activeWindows: 1
     });
+    expect(summary.qualityMetrics.executionImpact).toMatchObject({
+      attentionLevel: "watch",
+      lastSuccessfulCompletionAt: "2026-07-07T11:05:00.000Z",
+      minutesSinceLastSuccessfulCompletion: 85,
+      qualityEventsSinceLastSuccessfulCompletion: 3,
+      fallbackResolvesSinceLastSuccessfulCompletion: 1,
+      degradationStartsSinceLastSuccessfulCompletion: 1,
+      activeDegradedNetworks: 1,
+      queuedOrRunningJobsOnActiveDegradedNetworks: 1,
+      deadLetterJobsOnActiveDegradedNetworks: 0
+    });
+    expect(summary.operationalSummary).toMatchObject({
+      overallSeverity: "critical",
+      activeAlertCount: 4,
+      inventoryHealth: {
+        riskLevel: "ok",
+        activeEndpoints: 3,
+        distinctProviders: 3,
+        distinctAsns: 3,
+        distinctPools: 3,
+        distinctRegions: 3,
+        largestRegionalDomainSize: 1,
+        minimumRecommendedFailureDomains: 3,
+        failedDimensions: [],
+        policyViolationMessage: null,
+      },
+      retention: {
+        probeReportsDays: 45,
+        routeEventsDays: 45,
+        routeReprobeJobsDays: 14,
+        routeSuccessRollupsDays: 180,
+        routeRankingsDays: 180
+      }
+    });
+    expect(summary.operationalSummary.alerts.map((alert) => alert.id)).toEqual([
+      "dead-letter-jobs",
+      "overdue-queued-jobs",
+      "quality-signal-backlog",
+      "sla-breaches",
+    ]);
+    expect(detectOpsAlertsFromSummary(summary).map((alert) => alert.id)).toEqual(
+      summary.operationalSummary.alerts.map((alert) => alert.id)
+    );
+    expect(summary.operationalSummary.history).toHaveLength(3);
+    expect(summary.operationalSummary.history[0]).toMatchObject({
+      startedAt: "2026-07-07T10:00:00.000Z",
+      severity: "watch",
+      feedbackEvents: 2,
+      connectedCount: 0,
+      unstableCount: 1,
+      failedCount: 1,
+      fallbackResolves: 1,
+      queuedJobs: 1,
+      completedJobs: 0,
+      deadLetterJobs: 0,
+    });
+    expect(summary.operationalSummary.history[2]).toMatchObject({
+      startedAt: "2026-07-07T12:00:00.000Z",
+      severity: "watch",
+      feedbackEvents: 1,
+      connectedCount: 1,
+      queuedJobs: 1,
+      completedJobs: 0,
+      deadLetterJobs: 0,
+    });
+    expect(summary.operationalSummary.dailyHistory).toHaveLength(1);
+    expect(summary.operationalSummary.dailyHistory[0]).toMatchObject({
+      startedAt: "2026-07-07T00:00:00.000Z",
+      severity: "critical",
+      hourlyWindows: 3,
+      feedbackEvents: 6,
+      connectedCount: 3,
+      unstableCount: 1,
+      failedCount: 2,
+      fallbackResolves: 2,
+      queuedJobs: 3,
+      completedJobs: 2,
+      deadLetterJobs: 1,
+    });
 
     expect(summary.routeReprobeExecution.totals).toMatchObject({
       totalJobs: 3,
@@ -317,11 +404,181 @@ describe("buildRouteDecisionOpsSummary", () => {
       p95TimeToStartMinutes: 10,
       oldestQueuedAgeMinutes: 30,
     });
+    const boomFailure = summary.routeReprobeExecution.failureDrilldown.find((item) => item.failureKey === "boom");
+    expect(boomFailure).toMatchObject({
+      failureKey: "boom",
+      affectedJobs: 1,
+      deadLetterJobs: 1,
+      retryScheduledCount: 1,
+      failedEventCount: 2,
+      leaseReclaimedCount: 0,
+      sampleJobIds: ["job-dead"],
+    });
+    const reclaimedFailure = summary.routeReprobeExecution.failureDrilldown.find(
+      (item) => item.failureKey === "lease_expired_before_completion"
+    );
+    expect(reclaimedFailure).toMatchObject({
+      failureKey: "lease_expired_before_completion",
+      affectedJobs: 1,
+      deadLetterJobs: 0,
+      retryScheduledCount: 0,
+      failedEventCount: 0,
+      leaseReclaimedCount: 1,
+      sampleJobIds: ["job-dead"],
+    });
+    expect(summary.routeReprobeExecution.timeline[0]).toMatchObject({
+      jobId: "job-queued",
+      event: "retry_scheduled",
+      attempt: 1,
+      message: "timeout",
+      network: {
+        networkType: "wifi",
+        carrier: "Carrier One",
+        asn: 64500,
+      },
+    });
     expect(summary.routeReprobeExecution.recentJobs[0]).toMatchObject({
       id: "job-queued",
       latestAttemptEvent: "retry_scheduled",
       timeToStartMinutes: null,
       lifecycleMinutes: 30,
+      qualityImpact: {
+        feedbackEventsOnJobNetwork: 1,
+        connectedCountOnJobNetwork: 1,
+        unstableCountOnJobNetwork: 0,
+        failedCountOnJobNetwork: 0,
+        fallbackResolvesOnJobNetwork: 0,
+        degradationStartsOnJobNetwork: 0,
+        activeDegradationOnJobNetwork: true,
+        dominantFailureReasonOnJobNetwork: null,
+        latestQualityEventAt: "2026-07-07T12:10:00.000Z",
+      },
     });
+    expect(summary.routeReprobeExecution.workerAlerts.map((alert) => alert.id)).toEqual([
+      "worker-dead-letter:worker-3",
+      "worker-retries:worker-4",
+      "worker-stale:worker-2",
+    ]);
+    expect(summary.routeReprobeExecution.workerHotspots[0]).toMatchObject({
+      workerId: "worker-3",
+      claimedJobs: 1,
+      completedJobs: 0,
+      deadLetterJobs: 1,
+      retryScheduledCount: 0,
+      failedEventCount: 1,
+      leaseReclaimedCount: 0,
+      staleRunningJobs: 0,
+      latestActivityAt: "2026-07-07T11:40:00.000Z",
+      sampleJobIds: ["job-dead"],
+      failureKeys: ["boom"],
+    });
+    const workerTwo = summary.routeReprobeExecution.workerHotspots.find((item) => item.workerId === "worker-2");
+    expect(workerTwo).toMatchObject({
+      claimedJobs: 2,
+      retryScheduledCount: 1,
+      failedEventCount: 1,
+      leaseReclaimedCount: 1,
+      sampleJobIds: ["job-dead"],
+    });
+    const wifiHotspot = summary.routeReprobeExecution.networkHotspots.find(
+      (item) => item.network.networkType === "wifi" && item.network.asn === 64500
+    );
+    expect(wifiHotspot).toMatchObject({
+      network: {
+        networkType: "wifi",
+        carrier: "Carrier One",
+        asn: 64500,
+      },
+      totalJobs: 1,
+      queuedJobs: 1,
+      completedJobs: 0,
+      deadLetterJobs: 0,
+      activeDegradation: true,
+      activeDegradationMinutes: 75,
+      feedbackEvents: 6,
+      connectedCount: 3,
+      unstableCount: 1,
+      failedCount: 2,
+      fallbackResolves: 2,
+      latestJobAt: "2026-07-07T12:00:00.000Z",
+      latestQualityEventAt: "2026-07-07T12:10:00.000Z",
+      dominantFailureReason: "timeout",
+      sampleJobIds: ["job-queued"],
+    });
+    expect(summary.routeReprobeExecution.focusedDrilldowns.worker).toMatchObject({
+      workerId: "worker-3",
+      activeAlertCount: 1,
+      deadLetterJobs: 1,
+      sampleJobIds: ["job-dead"],
+    });
+    expect(summary.routeReprobeExecution.focusedDrilldowns.worker?.recentTimeline[0]).toMatchObject({
+      workerId: "worker-3",
+      event: "failed",
+      jobId: "job-dead",
+    });
+    expect(summary.routeReprobeExecution.focusedDrilldowns.network).toMatchObject({
+      networkKey: "wifi:Carrier One:64500:PL:Mazowieckie",
+      queuedOrRunningJobs: 1,
+      deadLetterJobs: 0,
+      activeDegradation: true,
+      dominantFailureReason: "timeout",
+    });
+    expect(summary.routeReprobeExecution.focusedDrilldowns.network?.relatedJobs[0]).toMatchObject({
+      id: "job-queued",
+      status: "queued",
+    });
+    expect(summary.routeReprobeExecution.focusedDrilldowns.job).toMatchObject({
+      job: {
+        id: "job-dead",
+        status: "dead_letter",
+      },
+      relatedWorkerIds: ["worker-2", "worker-3"],
+    });
+    expect(summary.routeReprobeExecution.focusedDrilldowns.job?.attemptTrail[0]).toMatchObject({
+      jobId: "job-dead",
+      event: "failed",
+    });
+  });
+
+  it("raises an explainable alert when server inventory is not diverse enough", () => {
+    const summary = buildRouteDecisionOpsSummary({
+      windowHours: 6,
+      recentLimit: 12,
+      summaryLimit: 6,
+      now: new Date("2026-07-07T12:30:00.000Z"),
+      routeEvents: [],
+      routeReprobeJobs: [],
+      endpointInventory: [
+        {
+          endpointId: "ep-1",
+          provider: "Hetzner",
+          asn: 24940,
+          poolCode: "fra-a",
+          countryCode: "DE",
+          region: "Germany",
+        },
+      ],
+    });
+
+    expect(summary.operationalSummary.inventoryHealth).toMatchObject({
+      riskLevel: "critical",
+      activeEndpoints: 1,
+      distinctProviders: 1,
+      distinctAsns: 1,
+      distinctPools: 1,
+      distinctRegions: 1,
+      largestRegionalDomainSize: 1,
+      minimumRecommendedFailureDomains: 3,
+      failedDimensions: ["active endpoints 1/3", "providers 1/3", "ASNs 1/3", "regions 1/3"],
+      policyViolationMessage:
+        "Active inventory must keep at least 3 independent failure domains across provider/ASN/region; got active endpoints 1/3, providers 1/3, ASNs 1/3, regions 1/3.",
+    });
+    expect(detectOpsAlertsFromSummary(summary)).toContainEqual(
+      expect.objectContaining({
+        id: "inventory-failure-domain-risk",
+        detail:
+          "Active inventory must keep at least 3 independent failure domains across provider/ASN/region; got active endpoints 1/3, providers 1/3, ASNs 1/3, regions 1/3."
+      })
+    );
   });
 });

@@ -5,6 +5,9 @@ export type AdminUserSummary = {
   contact: string;
   contactType: "telegram" | "email";
   isAdmin: boolean;
+  opsAlertImmediateEnabled: boolean;
+  opsAlertDigestEnabled: boolean;
+  opsAlertEscalationTier: "primary" | "secondary";
   status: "active" | "blocked" | "trial";
   memberSince: string;
   lastAuthenticatedAt: string | null;

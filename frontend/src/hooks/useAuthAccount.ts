@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { HttpError, readJson } from "../lib";
+import { HttpError, readJson, setStoredAuthSessionId } from "../lib";
 import type {
   AccountResponse,
   AccountSummary,
@@ -48,6 +48,11 @@ export function useAuthAccount({
     setContactDraft(nextAccount?.user.contact ?? "");
   }
 
+  function applyAuth(nextAuth: AuthSession | null) {
+    setAuth(nextAuth);
+    setStoredAuthSessionId(nextAuth?.isAuthenticated ? nextAuth.id : null);
+  }
+
   function clearChallengeState() {
     setActiveChallenge(null);
     setChallengeCodeDraft("");
@@ -57,7 +62,7 @@ export function useAuthAccount({
     try {
       onClearError();
       const authData = await readJson<AuthResponse>("/api/auth/session");
-      setAuth(authData.auth);
+      applyAuth(authData.auth);
 
       const accountData = authData.auth.isAuthenticated
         ? await readJson<AccountResponse>("/api/account")
@@ -129,7 +134,7 @@ export function useAuthAccount({
         body: JSON.stringify({ login, password }),
       });
 
-      setAuth(data.auth);
+      applyAuth(data.auth);
       applyAccount(data.account);
       clearChallengeState();
       await onAuthSuccess?.();
@@ -167,7 +172,7 @@ export function useAuthAccount({
         body: JSON.stringify({ login, password, displayName }),
       });
 
-      setAuth(data.auth);
+      applyAuth(data.auth);
       applyAccount(data.account);
       clearChallengeState();
       await onAuthSuccess?.();
@@ -209,7 +214,7 @@ export function useAuthAccount({
 
       setActiveChallenge(data.challenge);
       setChallengeTargetDraft(data.challenge.target);
-      setChallengeCodeDraft(data.challenge.code);
+      setChallengeCodeDraft("");
     } catch (nextError) {
       onError(nextError instanceof Error ? nextError.message : "Unknown error");
     } finally {
@@ -239,7 +244,7 @@ export function useAuthAccount({
         }),
       });
 
-      setAuth(data.auth);
+      applyAuth(data.auth);
       applyAccount(data.account);
       clearChallengeState();
       await onAuthSuccess?.();
@@ -266,7 +271,7 @@ export function useAuthAccount({
         method: "POST",
       });
 
-      setAuth(data.auth);
+      applyAuth(data.auth);
       applyAccount(null);
       clearChallengeState();
     } catch (nextError) {

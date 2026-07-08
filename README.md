@@ -212,6 +212,12 @@ CI в GitHub Actions прогоняет те же проверки послед�
 
 ## Что делаем дальше
 
+Актуальный приоритетный порядок работ (закрыть OTP-утечку → поднять
+реальный VLESS+REALITY транспорт → только потом возвращаться к
+alerting-слою) зафиксирован отдельно в
+[docs/PRIORITY_PLAN.md](/Users/miko/Documents/simple-dimple/docs/PRIORITY_PLAN.md)
+и временно переопределяет порядок ниже.
+
 Следующий логичный шаг:
 
 1. решать, нужен ли поверх текущего focused triage drilldown отдельный alert delivery path
@@ -220,16 +226,15 @@ CI в GitHub Actions прогоняет те же проверки послед�
 
 Если приземлять это на локальный репозиторий без внешних сервисов, то следующий practical increment такой:
 
-1. persisted `ops alerts` feed в backend
-2. admin-only acknowledge/snooze flow
-3. отдельная alert list в текущем `Ops` экране
+1. внешний delivery path поверх уже работающего local delivery log
+2. при необходимости явные escalation chains или digest scheduling
+3. только потом отдельный specialized ops surface, если текущего `Ops` действительно станет мало
 
 Рабочая очередь:
 
-1. migration и storage-модель `OpsAlert`
-2. detector для сигналов из quality/execution trail
-3. admin API для feed + lifecycle actions
-4. `Ops` UI для triage
+1. при необходимости поднять manual resend/retry controls поверх уже существующего delivery trail
+2. при необходимости уточнить policy для secondary-step escalation, а не только `primary -> secondary`
+3. только после этого решать, нужен ли более самостоятельный specialized ops surface
 
 Текущий статус:
 
@@ -238,7 +243,15 @@ CI в GitHub Actions прогоняет те же проверки послед�
 - alert rules уже вынесены в отдельный detector module
 - persisted alerts теперь дополнительно refresh-ятся из worker/runtime контура, а не только при чтении `GET /api/ops/alerts`
 - `Ops` теперь уже умеет показывать escalation preview по admin contacts для каждого persisted alert-а
-- следующим шагом уже остаётся реальная delivery execution поверх этого preview-слоя, а не только моделирование recipients
+- поверх preview-слоя теперь уже поднят и local delivery execution: `POST /api/ops/alerts/:alertId/deliver` materialize-ит persisted delivery log по admin recipients
+- backend теперь умеет ходить и во внешний transport-adapter: `email` через `Resend API`, `Telegram` через `Bot API`, но persisted `OpsAlertDelivery` trail по-прежнему остаётся источником истины
+- `critical` и `watch` alerts теперь разделены по delivery semantics жёстко: `critical` уходят через direct `deliver`, а `watch` только через общий `digest batch`
+- `Admin` теперь уже управляет не только флагом `isAdmin`, но и routing knobs для alerting: `immediate on/off`, `digest on/off`, `primary/secondary tier`
+- critical delivery теперь проходит через явный chain `primary -> secondary`: backend сначала шлёт в primary tier и только при сбое/пустом первом шаге доходит до secondary
+- `Ops` UI теперь умеет не только смотреть preview, но и запускать delivery execution и читать recent delivery log
+- active server inventory теперь уже закреплён как явный invariant, а не как свойство seed-данных: backend fail-closed останавливает route flow, если активные endpoint-ы не дают минимум `3` независимых domains по `provider / ASN / region`
+- inventory diagnosis теперь проходит через весь ops/alerting контур: summary, persisted alert tile, alert metadata и escalation/local delivery message используют одни и те же `failedDimensions` и `policyViolationMessage`
+- следующим шагом теперь уже остаются manual resend/retry controls и более тонкая escalation policy поверх текущего `primary -> secondary` chain
 
 ## Документация
 
@@ -250,4 +263,5 @@ CI в GitHub Actions прогоняет те же проверки послед�
 - схема БД: [docs/DB_SCHEMA.md](/Users/miko/Documents/simple-dimple/docs/DB_SCHEMA.md)
 - roadmap: [docs/ROADMAP.md](/Users/miko/Documents/simple-dimple/docs/ROADMAP.md)
 - code review: [docs/CODE_REVIEW.md](/Users/miko/Documents/simple-dimple/docs/CODE_REVIEW.md)
+- приоритетный план (OTP-фикс → реальный транспорт → alerting): [docs/PRIORITY_PLAN.md](/Users/miko/Documents/simple-dimple/docs/PRIORITY_PLAN.md)
 - network intelligence: [docs/NETWORK_INTELLIGENCE.md](/Users/miko/Documents/simple-dimple/docs/NETWORK_INTELLIGENCE.md)

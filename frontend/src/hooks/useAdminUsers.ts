@@ -14,6 +14,13 @@ interface UseAdminUsersOptions {
   onError: (message: string) => void;
 }
 
+type AdminUserPatch = {
+  isAdmin?: boolean;
+  opsAlertImmediateEnabled?: boolean;
+  opsAlertDigestEnabled?: boolean;
+  opsAlertEscalationTier?: "primary" | "secondary";
+};
+
 export function useAdminUsers({
   currentUserId,
   onClearError,
@@ -41,7 +48,7 @@ export function useAdminUsers({
     }
   }
 
-  async function toggleUserAdmin(targetUser: AdminUserSummary) {
+  async function updateAdminUser(targetUser: AdminUserSummary, patch: AdminUserPatch) {
     setIsSubmitting(true);
     try {
       onClearError();
@@ -50,7 +57,7 @@ export function useAdminUsers({
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ isAdmin: !targetUser.isAdmin }),
+          body: JSON.stringify(patch),
         },
       );
 
@@ -78,6 +85,31 @@ export function useAdminUsers({
     }
   }
 
+  async function toggleUserAdmin(targetUser: AdminUserSummary) {
+    await updateAdminUser(targetUser, { isAdmin: !targetUser.isAdmin });
+  }
+
+  async function toggleImmediateRouting(targetUser: AdminUserSummary) {
+    await updateAdminUser(targetUser, {
+      opsAlertImmediateEnabled: !targetUser.opsAlertImmediateEnabled,
+    });
+  }
+
+  async function toggleDigestRouting(targetUser: AdminUserSummary) {
+    await updateAdminUser(targetUser, {
+      opsAlertDigestEnabled: !targetUser.opsAlertDigestEnabled,
+    });
+  }
+
+  async function toggleEscalationTier(targetUser: AdminUserSummary) {
+    await updateAdminUser(targetUser, {
+      opsAlertEscalationTier:
+        targetUser.opsAlertEscalationTier === "primary"
+          ? "secondary"
+          : "primary",
+    });
+  }
+
   function clearAdminUsers() {
     setAdminUsers([]);
   }
@@ -87,6 +119,9 @@ export function useAdminUsers({
     isSubmitting,
     loadAdminUsers,
     toggleUserAdmin,
+    toggleImmediateRouting,
+    toggleDigestRouting,
+    toggleEscalationTier,
     clearAdminUsers,
   };
 }

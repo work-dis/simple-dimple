@@ -543,7 +543,166 @@
 - локальные команды `npm run check` и `npm run build` остаются удобными для одиночного запуска
 - если позже захотим упростить локальные скрипты, это можно будет делать отдельно от CI
 
-## Правило обновления|
+## Decision 020
+
+Дата: `2026-07-08`
+
+Тема: verification-код никогда не покидает backend в HTTP-ответе
+
+Решение:
+
+- `POST /api/auth/challenge` и `store.requestAuthChallenge()` больше не возвращают
+  plaintext `code` — только `{ challengeId, provider, target, expiresAt }`
+- код доставляется получателю через транспорт-адаптер
+  [backend/src/transport/message-transport.ts](../backend/src/transport/message-transport.ts)
+  (Resend для email, Telegram Bot API для telegram) — тот же модуль, из которого
+  теперь переиспользует общую часть [backend/src/store/ops-alert-delivery.ts](../backend/src/store/ops-alert-delivery.ts)
+- если ни один транспорт не сконфигурирован (нет `RESEND_API_KEY` /
+  `OPS_ALERT_TELEGRAM_BOT_TOKEN`), код пишется только в server log
+  (`console.info`), а не отдается клиенту
+- если сконфигурированный транспорт реально falls, `requestAuthChallenge` кидает
+  ошибку, а не отдает "успех" без доставки
+
+Почему:
+
+- прежняя реализация отдавала одноразовый код прямо в ответе на challenge —
+  email/Telegram верификация фактически ничего не проверяла, это была открытая
+  и уже эксплуатируемая дыра для account takeover ([PRIORITY_PLAN.md, Шаг 1](PRIORITY_PLAN.md))
+- в проекте уже был рабочий Resend/Telegram транспорт для ops-алертов, поэтому
+  для auth не заводили отдельный canal доставки, а вынесли общую часть в
+  переиспользуемый модуль
+
+Последствия:
+
+- frontend больше не может само-заполнять поле кода из ответа `/api/auth/challenge`
+  ([frontend/src/hooks/useAuthAccount.ts](../frontend/src/hooks/useAuthAccount.ts),
+  [frontend/src/components/AuthForms.tsx](../frontend/src/components/AuthForms.tsx)) —
+  пользователь вводит код, реально полученный по email/Telegram
+  - на локальном dev-стенде без настроенного транспорта код нужно смотреть в
+    логе backend, а не в интерфейсе
+- ops-alerts и auth verification теперь делят один и тот же транспорт-модуль,
+  так что новые каналы доставки (например SMS) заводятся один раз для обоих
+
+## Decision 021
+
+Дата: `2026-07-08`
+
+Тема: реальный VPN-туннель не может жить внутри PWA — граница PWA/native для транспорта
+
+Решение:
+
+- `PWA` (Decision 001) остаётся control-plane: выбор сервера, статус, аккаунт,
+  выдача `connectionConfig` — но она физически не может открыть сырой TCP-сокет
+  или поднять `TUN`-интерфейс, потому что у веб-платформы нет low-level network API
+- реальный VLESS+REALITY туннель может существовать только в одном из двух мест:
+  1. на этапе сервера — проверяется reference-клиентом (`xray-core` CLI, v2rayN,
+     NekoBox), которому backend просто отдаёт `connectionConfig`
+  2. на устройстве — через native-обвязку (`Capacitor` + Android `VpnService`,
+     см. Этап 2b в [PRIORITY_PLAN.md](PRIORITY_PLAN.md))
+- "нажал Подключить — приложение само подняло туннель" в PWA без native-обвязки
+  не будет означать ничего, кроме смены `session.status` в БД — это уже так и
+  остаётся так, пока не появится Этап 2b
+
+Почему:
+
+- продукт обещает пользователю реальное VPN-подключение
+  ([PRODUCT.md](PRODUCT.md)), а `PWA-first` порядок из Decision 001 без этой
+  оговорки незаметно противоречит этому обещанию — выглядит так, будто
+  "хороший PWA UX" сам по себе довезёт до рабочего VPN, а это физически не так
+- явная фиксация этой границы нужна до начала работы над
+  [PRIORITY_PLAN.md, Шаг 2](PRIORITY_PLAN.md), чтобы Этап 2a (сервер) и Этап 2b
+  (native) не путали друг друга с "тем самым PWA-клиентом"
+
+Последствия:
+
+- Этап 2a (сервер + Xray inbound + выдача `connectionConfig`) можно проверить
+  и считать сделанным без единой строчки native-кода — критерий успеха: внешний
+  reference-клиент реально подключается и меняет исходящий IP
+- Этап 2b (Capacitor Android shell) — обязателен для того, чтобы кнопка
+  "Подключить" в самом продукте (не в reference-клиенте) хоть раз означала
+  настоящий VPN; до его появления кнопка в PWA остаётся честной лишь в смысле
+  "готовит и показывает конфиг", не "подключает"
+- `ROADMAP.md, Этап 4` (нативная упаковка) в части VPN-туннеля перестаёт быть
+  "полировкой после хорошего PWA UX" и становится обязательным условием, чтобы
+  обещание продукта выполнялось хоть на одной платформе
+
+## Decision 022
+
+Дата: `2026-07-08`
+
+Тема: hardening auth-поверхности — обязательная авторизация data-plane, срок жизни
+сессий, стойкий OTP и лимит попыток, конфигурируемый CORS
+
+Решение:
+
+- **data-plane закрыт авторизацией.** `GET /api/session`, `POST /api/routes/resolve`,
+  `POST /api/connect`, `POST /api/server`, `POST /api/telemetry/probe` и
+  `POST /api/routes/feedback` теперь требуют аутентифицированную сессию
+  (`requireAuthenticatedAuthSession`) и отвечают `401` анониму — тем же гардом, что
+  уже стоял на admin/ops-эндпоинтах ([backend/src/server.ts](../backend/src/server.ts))
+- **срок жизни сессии.** `AuthSession` больше не создаётся с `expiresAt: null`
+  (вечная и неотзываемая по времени) — при `login`/`verify` проставляется
+  абсолютный TTL (`authSessionTtlMs`, сейчас 30 дней). `mapAuthSessionRow` уже
+  переводит просроченную сессию в `expired`/`isAuthenticated=false` при чтении, так
+  что enforcement появляется без дополнительной логики
+  ([backend/src/store/auth.ts](../backend/src/store/auth.ts))
+- **OTP из CSPRNG.** Код верификации генерируется через `crypto.randomInt`, а не
+  `Math.random()` (состояние обычного PRNG предсказуемо)
+- **лимит попыток OTP.** У `VerificationChallenge` появилось поле `attempts`
+  ([migration 20260708170000_verification_challenge_attempts](../backend/prisma/migrations/20260708170000_verification_challenge_attempts/migration.sql));
+  после `maxVerificationAttempts` (5) неверных вводов challenge принудительно
+  гасится (`status: expired`) — 6-значный код нельзя перебрать в его 10-минутном окне
+- **CORS.** Origin берётся из `CORS_ALLOWED_ORIGINS` (список через запятую); пусто —
+  reflect-all только для локального dev, прод обязан задать явный allowlist
+
+Почему:
+
+- половина API отдавала полный каталог endpoint-ов (с IP) анониму и принимала от
+  него телеметрию — для anti-censorship сервиса это и готовый список нод для
+  блокировки, и вектор отравления route-ranking для всех пользователей
+- бессрочная сессия + хранение `x-auth-session-id` в `localStorage` означало, что
+  утёкший id действует вечно
+- `Math.random()` и отсутствие лимита попыток вместе делали email/Telegram OTP
+  реально перебираемым, несмотря на глобальный IP rate limit
+- эти пункты закрывают ту же категорию проблем, что уже начал закрывать
+  [[Decision 020]] (OTP-утечка), но со стороны доступа и стойкости, а не доставки
+
+Последствия:
+
+- frontend грузит сессию только для аутентифицированного пользователя и трактует
+  `401` как signed-out, а не ошибку ([frontend/src/hooks/useRouteSession.ts](../frontend/src/hooks/useRouteSession.ts),
+  [frontend/src/App.tsx](../frontend/src/App.tsx)); кнопка `Подключить` на `Home`
+  заблокирована до входа
+- анонимный клиент больше не видит инвентарь нод и не может писать телеметрию
+- тесты на срок жизни сессии и лимит OTP-попыток —
+  [backend/src/store/__tests__/auth.test.ts](../backend/src/store/__tests__/auth.test.ts)
+
+### Что осознанно НЕ трогали в этом проходе
+
+- **`AppSession` — глобальный singleton (`id: "primary"`).** `status`/
+  `activeServerId`/`connectCount` — одна строка на всё развёртывание, общая для
+  всех пользователей ([backend/src/store/session.ts](../backend/src/store/session.ts)).
+  После закрытия data-plane авторизацией это уже не утечка чужих *credentials*
+  (реальные per-user данные — `connectionConfig`/`vlessUuid`, assignments,
+  `LastKnownGoodRoute` — и так привязаны к `userId`), а корректность отображения
+  общего статуса подключения. Полноценный per-user session state завязан на
+  реальный транспорт ([PRIORITY_PLAN.md, Шаг 2](PRIORITY_PLAN.md)): сам
+  `/api/connect` сейчас лишь переключает поле `status` в БД, поэтому делать его
+  per-user до появления настоящего туннеля — полировка заглушки. Оставлено как
+  явная задача Шага 2, чтобы не расходиться с поэтапным планом.
+- **npm audit (3 moderate).** Единственный advisory — `serveStatic` в
+  `@hono/node-server`, притянут транзитивно через `prisma → @prisma/dev`. `prisma`
+  — это `devDependency` (не в production-runtime), уязвимая функция `serveStatic` в
+  коде не используется. Единственный доступный фикс (`npm audit fix --force`)
+  откатывает `prisma` 7.8→6.19 — breaking. Форс-даунгрейд мажорной версии Prisma
+  несоизмерим с dev-only и неэксплуатируемой здесь уязвимостью; принято как
+  осознанный риск до планового апдейта prisma.
+- **dev-значения (`change-me` в `compose.yaml`, dev-ключ REALITY в
+  `deploy/xray/dev-config.json`).** Оба явно помечены как non-production в своих
+  файлах/README; для прода README уже требует сгенерировать новый keypair и
+  секреты. Это dev-контур, не меняем.
+
+## Правило обновления
 
 Добавляем новую запись, когда принимается решение, которое:
 

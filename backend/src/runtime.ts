@@ -24,6 +24,10 @@ export function createBackendRuntime(databaseUrl?: string) {
     return state.auth;
   }
 
+  async function loadAuthContext(sessionId?: string | null) {
+    return store.readAuthContext(sessionId);
+  }
+
   async function resolveRouteDecision(
     auth: AuthSessionSummary,
     input?: ResolveRoutesBody | TelemetryNetworkContext | null
@@ -76,6 +80,7 @@ export function createBackendRuntime(databaseUrl?: string) {
     store,
     loadState,
     loadAuth,
+    loadAuthContext,
     resolveRouteDecision,
     resolveRouteDecisionForActiveAuth,
     async disconnect() {

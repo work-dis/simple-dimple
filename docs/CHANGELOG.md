@@ -8,7 +8,413 @@
 - что было сделано
 - зачем это было сделано
 
+## 2026-07-08
+
+### Security hardening auth-поверхности: авторизация data-plane, срок жизни сессий, стойкий OTP, CORS
+
+Что сделали (backend):
+
+- **обязательная авторизация data-plane.** `GET /api/session`,
+  `POST /api/routes/resolve`, `POST /api/connect`, `POST /api/server`,
+  `POST /api/telemetry/probe`, `POST /api/routes/feedback` теперь отвечают `401`
+  анониму ([backend/src/server.ts](../backend/src/server.ts)) — раньше анонимный
+  клиент получал полный каталог нод с IP и мог отравлять route-ranking фейковой
+  телеметрией
+- **срок жизни сессии.** `AuthSession` создаётся с абсолютным TTL
+  (`authSessionTtlMs` = 30 дней) вместо `expiresAt: null`
+  ([backend/src/store/auth.ts](../backend/src/store/auth.ts)); просроченная сессия
+  на чтении становится `expired`/`isAuthenticated=false`
+- **OTP из CSPRNG + лимит попыток.** Код верификации — `crypto.randomInt` вместо
+  `Math.random()`; новое поле `VerificationChallenge.attempts`
+  ([migration 20260708170000_verification_challenge_attempts](../backend/prisma/migrations/20260708170000_verification_challenge_attempts/migration.sql)),
+  после 5 неверных вводов challenge гасится
+- **CORS.** origin из `CORS_ALLOWED_ORIGINS` (список через запятую), пусто =
+  reflect-all только для dev ([backend/.env.example](../backend/.env.example))
+- тесты: срок жизни сессии и лимит OTP-попыток в
+  [backend/src/store/__tests__/auth.test.ts](../backend/src/store/__tests__/auth.test.ts)
+
+Что сделали (frontend):
+
+- сессия грузится только для аутентифицированного пользователя, `401` трактуется
+  как signed-out, а не ошибка; кнопка `Подключить` заблокирована до входа
+  ([frontend/src/hooks/useRouteSession.ts](../frontend/src/hooks/useRouteSession.ts),
+  [frontend/src/App.tsx](../frontend/src/App.tsx),
+  [frontend/src/components/HomeScreen.tsx](../frontend/src/components/HomeScreen.tsx))
+
+Зачем:
+
+- продолжение линии [DECISIONS.md, Decision 020](DECISIONS.md) (OTP-утечка), но со
+  стороны доступа и стойкости: закрываем утечку инвентаря нод анониму, отравление
+  ranking, вечные неотзываемые сессии и перебор OTP; подробности и осознанно
+  отложенное (глобальный `AppSession`, npm audit, dev-значения) —
+  [DECISIONS.md, Decision 022](DECISIONS.md)
+
+### Backend сам проверяет живучесть endpoint'ов и убирает сломанные из ротации; фронтенд — по ROADMAP Этапу 1
+
+Что сделали (backend):
+
+- новая таблица полей на `Endpoint`: `lastHealthCheckAt`/`lastHealthCheckOk`/
+  `lastHealthCheckLatencyMs`/`consecutiveHealthFailures`
+  ([migration 20260708150000_endpoint_health_check](../backend/prisma/migrations/20260708150000_endpoint_health_check/migration.sql))
+- [backend/src/endpoint-healthcheck.ts](../backend/src/endpoint-healthcheck.ts) —
+  чистая функция `checkTcpReachability`: реальный TCP-коннект к `ipAddress:port`
+  endpoint'а с таймаутом, замер latency
+- [backend/src/store/endpoint-healthcheck.ts](../backend/src/store/endpoint-healthcheck.ts) —
+  `listCheckableEndpoints()` берёт только endpoint'ы с реальным
+  `EndpointTransportConfig` (нечего проверять у vitrine-данных без порта);
+  `applyHealthCheckResult()`: успех — endpoint помечается активным, latency
+  обновляется и на самом endpoint (влияет на baseline-сортировку в
+  `listServers()`, не только на отображение); 3 провала подряд — endpoint
+  автоматически получает `isActive: false` и выпадает из инвентаря/shortlist
+  (route-policy и так уже фильтрует по `isActive`, значит трафик сам
+  переключается на другой рабочий endpoint без ручного вмешательства);
+  успешная проверка после этого реактивирует endpoint обратно
+- [backend/src/endpoint-healthcheck-worker.ts](../backend/src/endpoint-healthcheck-worker.ts) —
+  независимый от per-user route-reprobe очереди фоновый воркер (по умолчанию
+  каждые 15с), подключён в [backend/src/worker.ts](../backend/src/worker.ts)
+  рядом с `route-reprobe-worker`
+- тесты: [backend/src/__tests__/endpoint-healthcheck.test.ts](../backend/src/__tests__/endpoint-healthcheck.test.ts),
+  [backend/src/store/__tests__/endpoint-healthcheck.test.ts](../backend/src/store/__tests__/endpoint-healthcheck.test.ts),
+  [backend/src/__tests__/endpoint-healthcheck-worker.test.ts](../backend/src/__tests__/endpoint-healthcheck-worker.test.ts)
+
+Что сделали (frontend, [ROADMAP.md, Этап 1](ROADMAP.md)):
+
+- [frontend/src/components/HomeScreen.tsx](../frontend/src/components/HomeScreen.tsx) —
+  кнопка `Подключить`/`Отключить` стала большим кругом по центру экрана
+  (`.connectButton`: `200x200px`, `border-radius: 50%`); блок с регионом/
+  временем/policy свернут в одну маленькую приглушённую строку под кнопкой
+  вместо четырёх dashboard-карточек; убрали неиспользуемые пропсы
+  `servers`/`currentAssignment` из `HomeScreen`
+- [frontend/src/styles.css](../frontend/src/styles.css) — `.homeMeta` больше не
+  grid из карточек с фоном, а центрированный текст мелким приглушённым шрифтом;
+  `.secondaryButton` (`Сервер: …`) стал плоской неброской ссылкой без рамки/фона
+
+Зачем:
+
+- [PRIORITY_PLAN.md, Шаг 2](PRIORITY_PLAN.md) требует, чтобы клиент "сам нашёл
+  рабочий маршрут" — раньше единственным источником правды о здоровье
+  endpoint'а был client-reported телеметрический отчёт конкретного
+  пользователя; теперь backend сам, независимо от пользователей, знает какие
+  endpoint'ы реально живы и быстрые, и снимает с ротации то, что сломалось —
+  это и есть "автозамена" сломанного конфига на рабочий, без участия человека
+- [ROADMAP.md, Этап 1](ROADMAP.md) — главный экран должен быть "статус + одна
+  большая кнопка", без dashboard-карточек и технических полей; вся сложность
+  (какой маршрут живой/быстрый) теперь целиком на бэкенде, а не в UI
+
+### Этап 2a: connectionConfig дошёл до фронтенда + закрыли пробел в `/api/server` + первая живая проверка
+
+Что сделали:
+
+- `frontend/src/types/session.ts` — добавлен тип `ConnectionConfigSummary`
+  (зеркало `backend/src/types.ts`) и поле `connectionConfig?: ConnectionConfigSummary | null`
+  в `SessionResponse`
+- `frontend/src/hooks/useRouteSession.ts` — новое состояние `connectionConfig`,
+  заполняется из ответов `POST /api/connect` и `POST /api/server`, сбрасывается
+  в `null`, когда бэкенд возвращает `null` (disconnected/не-vless endpoint);
+  наружу отдаётся из хука наравне с `session`/`routePolicy`
+- `POST /api/server` ([backend/src/server.ts](../backend/src/server.ts)) раньше
+  не выдавал `connectionConfig` вообще (только `/api/connect` и `/api/routes/resolve`
+  это делали) — если переключить сервер во время активного подключения,
+  фронтенд остался бы с конфигом от старого endpoint. Добавили выдачу
+  `connectionConfig` и туда же, когда `state.status === "connected"`
+- живая проверка вместо чтения кода: подняли `postgres`+`xray` через
+  `docker compose --profile xray up`, накатили миграции, засеяли dev-инвентарь
+  из `defaults.ts`, зарегистрировали тестового пользователя, прогнали PWA
+  через Vite dev server и реально понажимали `Подключить`/`Отключить`/смену
+  сервера в браузере — `connectionConfig` в ответах `/api/connect` и `/api/server`
+  корректно появляется/пропадает/обновляется на живом REALITY inbound
+  (`uuid`/`publicKey`/`shortId` совпадают с работающим `xray-core`)
+- сквозной SOCKS-туннель через REALITY не был до конца проверен в этой среде —
+  handshake через `host.docker.internal` в Docker Desktop на macOS нестабилен;
+  это похоже на артефакт виртуализованной сети хоста, а не баг кода (конфиг,
+  который отдаёт бэкенд, побайтово совпадает с тем, что ждёт сервер). Стоит
+  перепроверить на реальном dev-VPS
+
+Зачем:
+
+- [PRIORITY_PLAN.md, Шаг 2, Этап 2b, п.5](../docs/PRIORITY_PLAN.md) требует
+  подключить `connectionConfig` к экрану подключения во фронтенде — без
+  Android-тулинга дальше состояния/типов дойти нельзя (сам вызов `VpnTunnelPlugin`
+  живёт в `mobile/`, который не собирается в этой среде), но подготовить
+  данные для будущего вызова можно и нужно уже сейчас
+- `/api/server` — реальный пробел в контракте, а не то, что просил план буквально:
+  без него переключение сервера во время подключения оставляло бы фронтенд с
+  устаревшим/неверным connection-конфигом
+
+### Этап 2a: реальный VLESS+REALITY inbound (dev) + backend выдаёт настоящий connectionConfig
+
+Что сделали:
+
+- добавили локальный dev-Xray в [compose.yaml](/Users/miko/Documents/simple-dimple/compose.yaml:1)
+  (`profiles: ["xray"]`) с конфигом [deploy/xray/dev-config.json](/Users/miko/Documents/simple-dimple/deploy/xray/dev-config.json:1) —
+  реальный VLESS+REALITY inbound на `127.0.0.1:8443`, явно помечен как non-production
+- расширили Prisma-схему: новая таблица `EndpointTransportConfig` (1:1 с `Endpoint`;
+  порт/publicKey/shortId/sni/fingerprint/flow — не на самом `Endpoint`, потому что не
+  у всех endpoint-ов в `defaults.ts` вообще есть REALITY-транспорт) и `User.vlessUuid`
+  для стабильного per-user VLESS client id; миграция
+  [20260708130000_endpoint_transport_config](/Users/miko/Documents/simple-dimple/backend/prisma/migrations/20260708130000_endpoint_transport_config/migration.sql:1)
+- `backend/src/defaults.ts`: `de-fra-1` теперь указывает на реальный `127.0.0.1`
+  вместо RFC5737-заглушки и получил `defaultEndpointTransportConfigs`, которые один
+  в один совпадают со значениями в `dev-config.json`
+- новый чистый модуль [backend/src/connection-config.ts](/Users/miko/Documents/simple-dimple/backend/src/connection-config.ts:1)
+  строит настоящий `vless://` URI (`pbk`/`sid`/`sni`/`fp`/`flow`), и store-обёртка
+  [backend/src/store/connection-config.ts](/Users/miko/Documents/simple-dimple/backend/src/store/connection-config.ts:1)
+  (`issueConnectionConfig`) генерирует и переиспользует per-user `vlessUuid`
+- `POST /api/routes/resolve` и `POST /api/connect` возвращают новое поле
+  `connectionConfig` (не ломая текущий контракт `session`/`routePolicy`); `null` —
+  если пользователь не залогинен, endpoint не в REALITY-инвентаре или транспорт ещё
+  не сконфигурирован
+- тесты: [backend/src/__tests__/connection-config.test.ts](/Users/miko/Documents/simple-dimple/backend/src/__tests__/connection-config.test.ts:1)
+  на построение URI и
+  [backend/src/store/__tests__/connection-config.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/connection-config.test.ts:1)
+  на выдачу/переиспользование uuid и на все null-ветки
+
+Зачем:
+
+- [PRIORITY_PLAN.md, Шаг 2, Этап 2a](/Users/miko/Documents/simple-dimple/docs/PRIORITY_PLAN.md:78) —
+  первый случай, когда backend реально выдаёт рабочий connection-конфиг, а не
+  только `recommendedReason`/метаданные; проверяется reference-клиентом
+  (`xray-core` CLI / v2rayN / NekoBox), а не веб-клиентом — см.
+  [DECISIONS.md, Decision 021](/Users/miko/Documents/simple-dimple/docs/DECISIONS.md:1)
+  про то, почему PWA физически не может сама держать этот туннель
+
+Что осталось для полного Definition of done Шага 2:
+
+- ручная проверка через reference-клиент выполнена частично в более поздней сессии
+  (см. запись выше от того же дня): backend↔xray-inbound конфиг проверен вживую
+  (uuid/publicKey/shortId совпадают), но сквозной SOCKS-туннель через REALITY
+  не был до конца проверен из-за нестабильного handshake через
+  `host.docker.internal` в Docker Desktop на macOS — стоит перепроверить на
+  реальном dev-VPS вместо локального докера
+- Этап 2b — Capacitor Android shell
+
+### Закрыли OTP-утечку: verification-код больше не уходит в HTTP-ответе
+
+Что сделали:
+
+- `requestAuthChallenge()` в [backend/src/store/auth.ts](/Users/miko/Documents/simple-dimple/backend/src/store/auth.ts:1)
+  больше не возвращает наружу plaintext `code` — только `challengeId`/`provider`/`target`/`expiresAt`
+- вынесли общую транспорт-логику (Resend email, Telegram Bot API, `local_dev_outbox`
+  fallback) из [backend/src/store/ops-alert-delivery.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alert-delivery.ts:1)
+  в переиспользуемый модуль [backend/src/transport/message-transport.ts](/Users/miko/Documents/simple-dimple/backend/src/transport/message-transport.ts:1);
+  ops-alerts теперь тонкая обертка над ним
+- `requestAuthChallenge()` доставляет код через этот же транспорт; если ни email,
+  ни telegram транспорт не сконфигурированы, код пишется в server log
+  (`console.info`), а не в ответ клиенту; если сконфигурированный транспорт
+  реально падает — бросаем ошибку вместо тихого "успеха"
+- убрали фронтенд-автозаполнение поля кода и dev-виджет "Dev-код: ..." в
+  [frontend/src/hooks/useAuthAccount.ts](/Users/miko/Documents/simple-dimple/frontend/src/hooks/useAuthAccount.ts:1)
+  и [frontend/src/components/AuthForms.tsx](/Users/miko/Documents/simple-dimple/frontend/src/components/AuthForms.tsx:1)
+- добавили regression-тесты в
+  [backend/src/store/__tests__/auth.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/auth.test.ts:1),
+  которые ловят, если `code`/`codeHash` снова попадут в ответ `requestAuthChallenge()`
+
+Зачем:
+
+- прежний ответ `/api/auth/challenge` отдавал одноразовый код прямо в HTTP-теле —
+  email/Telegram верификация ничего не проверяла, это была активно эксплуатируемая
+  дыра для account takeover; см. [PRIORITY_PLAN.md, Шаг 1](/Users/miko/Documents/simple-dimple/docs/PRIORITY_PLAN.md:18)
+  и [DECISIONS.md, Decision 020](/Users/miko/Documents/simple-dimple/docs/DECISIONS.md:1)
+
+### Quiet window / delivery window with secondary after-hours fallback for watch digests
+
+Что сделали:
+
+- добавили quiet-window policy в [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1): `watch` digest теперь удерживает primary tier вне разрешённого UTC-окна, но secondary after-hours fallback всё ещё может принять batch
+- добавили env knobs `OPS_ALERT_DIGEST_WINDOW_START_HOUR_UTC` и `OPS_ALERT_DIGEST_WINDOW_END_HOUR_UTC` в [backend/.env.example](/Users/miko/Documents/simple-dimple/backend/.env.example:1)
+- backend `digest-deliver` теперь возвращает явный hold `quiet window policy`, только если outside-window batch уже некуда эскалировать; иначе secondary tier забирает after-hours batch
+- расширили tests в [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1), чтобы зафиксировать both secondary after-hours fallback и true outside-window hold без secondary tier
+
+Зачем:
+
+- не превращать watch-level follow-up в ночной spam, не теряя при этом возможность after-hours escalation в secondary tier
+- отделить `delivery window` от `cooldown` и `cadence`, чтобы policy читалась как три разных слоя, а не как один непрозрачный throttle
+- честно сместить следующий шаг уже к более гибким per-user/per-tier windows, а не к отсутствующему global quiet-window baseline
+
+### Digest cadence policy over watch-level batch delivery
+
+Что сделали:
+
+- добавили batch-level digest cadence в [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1): `watch` digest теперь смотрит не только на cooldown по тому же alert-у, но и на recent successful digest batches по recipient-у в целом
+- если primary digest recipient недавно уже получал другой watch batch, backend может сразу отправить digest в доступный secondary tier; если cadence-window ещё не пережил никто, `digest-deliver` получает явный hold по cadence policy
+- добавили env knob `OPS_ALERT_DIGEST_CADENCE_MS` в [backend/.env.example](/Users/miko/Documents/simple-dimple/backend/.env.example:1)
+- расширили tests в [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1) и UI error handling в [frontend/src/hooks/useRouteDecisionOps.ts](/Users/miko/Documents/simple-dimple/frontend/src/hooks/useRouteDecisionOps.ts:1)
+
+Зачем:
+
+- сделать watch-level digest менее шумным даже после того, как per-alert cooldown уже пройден
+- развести semantics `cooldown for same alert/feed` и `cadence for whole watch batch stream`, чтобы следующая policy уже строилась поверх более честного baseline
+- честно сместить следующий шаг уже к quiet windows и delivery windows, а не к отсутствующему digest cadence layer
+
+### Delivery cooldown policy for automatic ops alert escalation
+
+Что сделали:
+
+- добавили cooldown-aware delivery policy в [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1): обычные `deliver` и `digest-deliver` теперь смотрят на recent successful `OpsAlertDelivery` entries и временно удерживают того же recipient-а от повторной автоматической отправки
+- для `immediate` escalation это также влияет на tier routing: если primary recipient ещё в cooldown, backend может сразу перейти к доступному secondary tier вместо повторного спама в тот же контакт
+- добавили env knobs в [backend/.env.example](/Users/miko/Documents/simple-dimple/backend/.env.example:1): `OPS_ALERT_IMMEDIATE_COOLDOWN_MS` и `OPS_ALERT_DIGEST_COOLDOWN_MS`
+- расширили tests в [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1) и обновили UI error handling в [frontend/src/hooks/useRouteDecisionOps.ts](/Users/miko/Documents/simple-dimple/frontend/src/hooks/useRouteDecisionOps.ts:1)
+
+Зачем:
+
+- дать ops-alert escalation минимальную anti-spam policy до появления более сложных scheduling/cadence правил
+- удержать distinction между automatic throttled delivery и operator-driven `retry/resend`, которые по-прежнему остаются явным ручным bypass
+- честно сместить следующий шаг уже к digest cadence, quiet windows и более богатым escalation rules, а не к отсутствующему cooldown-baseline
+
+### Manual resend for already delivered ops alert entries
+
+Что сделали:
+
+- добавили отдельный backend flow `resend` в [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1) и admin endpoint `POST /api/ops/alerts/:alertId/deliveries/:deliveryId/resend` в [backend/src/server.ts](/Users/miko/Documents/simple-dimple/backend/src/server.ts:1)
+- delivered `immediate` entry теперь можно осознанно переотправить как operator-driven resend, а delivered `digest` entry переигрывает весь recipient-specific batch одним новым transport call без подмены под `retry`
+- `Ops` UI в [frontend/src/components/OpsScreen.tsx](/Users/miko/Documents/simple-dimple/frontend/src/components/OpsScreen.tsx:1), [frontend/src/hooks/useRouteDecisionOps.ts](/Users/miko/Documents/simple-dimple/frontend/src/hooks/useRouteDecisionOps.ts:1) и [frontend/src/App.tsx](/Users/miko/Documents/simple-dimple/frontend/src/App.tsx:1) теперь показывает `Send again` для успешных delivery entries
+- расширили unit-tests в [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1), чтобы зафиксировать both immediate и digest resend semantics
+
+Зачем:
+
+- дать администратору честный manual resend-path без необходимости симулировать transport-failure ради повторной отправки
+- сохранить explainable distinction между `retry after failure` и `manual resend after success` прямо в persisted delivery metadata
+- честно сместить следующий шаг уже к более тонкой escalation policy, scheduling и throttling, а не к отсутствующим operator actions
+
+### Manual retry controls over persisted ops alert delivery trail
+
+Что сделали:
+
+- добавили backend retry-flow в [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1) и admin endpoint `POST /api/ops/alerts/:alertId/deliveries/:deliveryId/retry` в [backend/src/server.ts](/Users/miko/Documents/simple-dimple/backend/src/server.ts:1)
+- failed `immediate` deliveries теперь переотправляются как single retry с новым persisted `batchId`, а failed `digest` deliveries восстанавливают весь recipient-specific batch и повторяют его одним transport call без потери explainable trail
+- `Ops` UI в [frontend/src/components/OpsScreen.tsx](/Users/miko/Documents/simple-dimple/frontend/src/components/OpsScreen.tsx:1) и [frontend/src/hooks/useRouteDecisionOps.ts](/Users/miko/Documents/simple-dimple/frontend/src/hooks/useRouteDecisionOps.ts:1) теперь позволяет запускать `Retry failed` прямо из delivery log
+- расширили tests в [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1), чтобы зафиксировать both immediate и digest retry semantics
+
+Зачем:
+
+- закрыть следующий roadmap-шаг про manual retry controls, не заставляя администратора пересобирать delivery object вручную
+- сохранить один explainable delivery lifecycle и для первой попытки, и для ручного retry, включая linkage между old/new batches
+- честно сместить следующую очередь уже к более тонкой escalation policy и scheduling, а не к отсутствующему retry-baseline
+
+### Admin routing controls and primary-secondary escalation chain
+
+Что сделали:
+
+- расширили модель `User` новыми routing-полями в [backend/prisma/schema.prisma](/Users/miko/Documents/simple-dimple/backend/prisma/schema.prisma:112) и migration [backend/prisma/migrations/20260708113000_ops_alert_admin_routing_controls/migration.sql](/Users/miko/Documents/simple-dimple/backend/prisma/migrations/20260708113000_ops_alert_admin_routing_controls/migration.sql:1): `opsAlertImmediateEnabled`, `opsAlertDigestEnabled`, `opsAlertEscalationTier`
+- backend admin API теперь умеет менять не только `isAdmin`, но и эти routing knobs через [backend/src/server.ts](/Users/miko/Documents/simple-dimple/backend/src/server.ts:990) и [backend/src/store/admin.ts](/Users/miko/Documents/simple-dimple/backend/src/store/admin.ts:1647)
+- escalation preview и delivery execution в [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1) теперь знают про явный chain `primary -> secondary`: для `critical` alerts второй шаг включается только если первый tier не сработал, а digest использует тот же tiered routing без случайной массовой рассылки
+- обновили [frontend/src/components/AdminScreen.tsx](/Users/miko/Documents/simple-dimple/frontend/src/components/AdminScreen.tsx:1), [frontend/src/hooks/useAdminUsers.ts](/Users/miko/Documents/simple-dimple/frontend/src/hooks/useAdminUsers.ts:1) и [frontend/src/components/OpsScreen.tsx](/Users/miko/Documents/simple-dimple/frontend/src/components/OpsScreen.tsx:1), чтобы routing controls и chain были видны и управляемы из UI
+- расширили tests в [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1): теперь они фиксируют direct delivery только в primary tier и secondary fallback при failure
+
+Зачем:
+
+- дать ops-контуру реальные admin controls поверх уже работающего delivery trail, а не держать routing жёстко зашитым в коде
+- сделать escalation semantics объяснимыми: не “шлём всем”, а “идём по tiers и эскалируем дальше только когда это действительно нужно”
+- честно сместить следующий шаг уже к manual resend/retry controls и более тонкой escalation policy, а не к отсутствующим базовым knobs
+
+### Watch alerts moved into persisted digest batch flow
+
+Что сделали:
+
+- разделили delivery semantics в [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1): direct `deliver` теперь работает только для `critical` alerts, а `watch`-уровень уходит через отдельный persisted digest batch
+- добавили backend endpoint `POST /api/ops/alerts/digest-deliver` в [backend/src/server.ts](/Users/miko/Documents/simple-dimple/backend/src/server.ts:1) и store-method `deliverDigest`, который собирает все активные `watch` alerts в один transport message на recipient, но сохраняет delivery trail по каждому alert-у с общим `batchId`
+- обновили [frontend/src/components/OpsScreen.tsx](/Users/miko/Documents/simple-dimple/frontend/src/components/OpsScreen.tsx:1) и [frontend/src/hooks/useRouteDecisionOps.ts](/Users/miko/Documents/simple-dimple/frontend/src/hooks/useRouteDecisionOps.ts:1): `critical` tile отправляет `Send now`, а `watch` tile запускает `Send digest batch`
+- расширили unit-tests в [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1), чтобы зафиксировать запрет direct-send для `watch` и semantics единого digest batch по recipients
+
+Зачем:
+
+- закрыть roadmap-пункт про понятное правило `watch` vs `critical`, а не оставлять ручную доставку случайной
+- сохранить persisted delivery trail explainable даже для агрегированного digest message, не теряя привязку к конкретным alert-ам
+- честно сместить следующий шаг уже к resend/admin knobs и escalation chains, а не к базовой digest-механике
+
+### External Telegram/email delivery adapters over persisted ops alert trail
+
+Что сделали:
+
+- добавили backend transport module [backend/src/store/ops-alert-delivery.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alert-delivery.ts:1) с channel-specific adapters для `email` и `Telegram`
+- `Ops` alert delivery теперь умеет не только писать `local_dev_outbox`, но и ходить во внешний `Resend API` для `email` и в `Telegram Bot API` для `telegram`, если заданы env-переменные из [backend/.env.example](/Users/miko/Documents/simple-dimple/backend/.env.example:1)
+- persisted `OpsAlertDelivery` trail в [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1) теперь хранит не только preview-данные, но и реальный `deliveryPath`, `providerMessageId`, transport metadata и failed attempts
+- расширили unit-test [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1) на success/failure semantics для внешних transport-ов
+
+Зачем:
+
+- закрыть roadmap-шаг не только на уровне local delivery execution, но и на уровне настоящего внешнего transport-adapter
+- сохранить один и тот же explainable alert object для preview, persisted trail и реальной отправки, не разъезжаясь по semantics между каналами
+- честно сместить следующий шаг уже к `digest`/`escalation chain` политике и admin controls, а не к отсутствующему базовому transport layer
+
+### Inventory policy hardened into fail-closed invariant and explainable alert context
+
+Что сделали:
+
+- вынесли inventory-policy в отдельный backend helper [backend/src/inventory-policy.ts](/Users/miko/Documents/simple-dimple/backend/src/inventory-policy.ts:1) и закрепили minimum invariant: активный inventory обязан держать минимум `3` независимых failure domains по `provider / ASN / region`
+- добавили fail-fast проверку в [backend/src/defaults.ts](/Users/miko/Documents/simple-dimple/backend/src/defaults.ts:1) и fail-closed enforcement в [backend/src/store/session.ts](/Users/miko/Documents/simple-dimple/backend/src/store/session.ts:1): если активные endpoint-ы policy не проходят, backend возвращает `503`, а не продолжает `session/resolve/connect/server` flow
+- расширили `inventoryHealth` в [backend/src/types.ts](/Users/miko/Documents/simple-dimple/backend/src/types.ts:1) и [frontend/src/types/ops.ts](/Users/miko/Documents/simple-dimple/frontend/src/types/ops.ts:1) новыми explainable-полями `failedDimensions` и `policyViolationMessage`
+- `Ops` UI теперь показывает этот diagnosis и в summary, и в persisted alert tile, а detector/materialized alerts используют тот же policy message для `inventory-failure-domain-risk`
+- escalation preview и local delivery message для inventory-alert теперь тоже включают breakdown по policy failure: failed dimensions, inventory counts и policy target
+- добавили unit-tests в [backend/src/__tests__/inventory-policy.test.ts](/Users/miko/Documents/simple-dimple/backend/src/__tests__/inventory-policy.test.ts:1), [backend/src/store/__tests__/session.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/session.test.ts:1), [backend/src/store/__tests__/route-decision-ops.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/route-decision-ops.test.ts:1) и [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1)
+
+Зачем:
+
+- перестать считать diversity active inventory случайным свойством seed-данных и сделать его явным runtime policy
+- fail-closed останавливать route resolution, когда выбирать по-настоящему не из чего, вместо косметического `riskLevel` рядом с продолжающимся connect-flow
+- сохранить один и тот же explainable diagnosis для summary, persisted alerts и escalation/delivery, чтобы ops-контур не пересобирал policy failure по-разному в каждом слое
+
+### Failure-domain hardening for transport-diagnostic fallback
+
+Что сделали:
+
+- ужесточили shortlist selection в [backend/src/route-policy.ts](/Users/miko/Documents/simple-dimple/backend/src/route-policy.ts:1): transport-diagnostic fallback теперь по возможности выбирается вне того же `provider/country/region/ASN` regional domain, а не только по другому `transport` или `IP`
+- emergency fallback теперь тоже сначала старается брать кандидатов из более независимого failure domain, а уже потом добирать локальные соседние варианты
+- добавили отдельный unit-test [backend/src/__tests__/route-policy.test.ts](/Users/miko/Documents/simple-dimple/backend/src/__tests__/route-policy.test.ts:1) на regional-domain fallback behavior и сохранение diversity при health-aware выборе
+- синхронизировали `ROADMAP`, `ARCHITECTURE`, `DEV_SETUP` и `NETWORK_INTELLIGENCE` с новым правилом shortlist
+
+Зачем:
+
+- сделать этап `Failure Domains` более реальным: не только разные labels и transports, но и более независимые региональные кластеры
+- снизить шанс, что shortlist выглядит разнообразным, оставаясь в одном и том же близком failure domain
+- подготовить следующий шаг к более явной inventory/server-pool политике, а не к косметическим изменениям trace-полей
+
+### Inventory risk surfaced in Ops summary
+
+Что сделали:
+
+- расширили [backend/src/store/admin.ts](/Users/miko/Documents/simple-dimple/backend/src/store/admin.ts:1), чтобы `GET /api/ops/route-decisions` считал `inventoryHealth` по активным endpoint-ам и server pools: providers, ASN, pools, regional domains и размер крупнейшего кластера
+- расширили detector в [backend/src/store/ops-alert-detector.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alert-detector.ts:1): слабый inventory теперь превращается в explainable alert `inventory-failure-domain-risk`
+- `Ops` UI показывает inventory risk прямо в summary-блоке, а unit-test в [backend/src/store/__tests__/route-decision-ops.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/route-decision-ops.test.ts:1) фиксирует этот сценарий
+- синхронизировали `ROADMAP`, `ARCHITECTURE` и `DEV_SETUP` с тем, что risk слабого server inventory теперь виден как рабочий ops signal
+
+Зачем:
+
+- сделать этап `Failure Domains` не только про shortlist policy, но и про качество самого inventory
+- заранее подсвечивать ситуацию, когда policy уже умеет выбирать независимо, а выбирать по-настоящему не из чего
+- сместить следующий шаг к реальному server-pool hardening, а не к догадкам по runtime traces
+
+### Local delivery execution over ops alert escalation preview
+
+Что сделали:
+
+- добавили Prisma-модель `OpsAlertDelivery` и migration `20260708011000_ops_alert_deliveries` для persisted delivery log по alert-ам и recipients
+- расширили backend store [backend/src/store/ops-alerts.ts](/Users/miko/Documents/simple-dimple/backend/src/store/ops-alerts.ts:1) операциями `listDeliveries` и `deliver`, которые materialize-ят local delivery execution поверх уже существующего escalation preview
+- подняли admin-only endpoints `GET /api/ops/alerts/:alertId/deliveries` и `POST /api/ops/alerts/:alertId/deliver`
+- `Ops` UI теперь умеет запускать delivery execution и показывать recent delivery log рядом с persisted alert lifecycle
+- добавили unit-test на delivery execution semantics и перепроверили `backend` tests, `frontend` build и `prisma validate`
+
+Зачем:
+
+- закрыть шаг roadmap про реальную delivery execution поверх preview-слоя, не таща преждевременно полноценные внешние SMTP/Telegram интеграции
+- сделать alert delivery не только вычисляемым preview, но и persisted explainable execution trail
+- честно сместить следующий шаг уже к внешним каналам или escalation chains, а не назад к внутренней delivery-механике
+
 ## 2026-07-07
+
+### Ops alerts verification tightened around persisted lifecycle
+
+Что сделали:
+
+- расширили unit-test [backend/src/store/__tests__/ops-alerts.test.ts](/Users/miko/Documents/simple-dimple/backend/src/store/__tests__/ops-alerts.test.ts:1), чтобы он проверял не только `escalation preview`, но и `detect -> materialize -> resolve` lifecycle persisted alerts
+- отдельно зафиксировали, что `acknowledged` alert остаётся sticky при очередном detector refresh, пока сам сигнал ещё жив
+- перепроверили текущий шаг плана через `backend` test suite, `frontend` production build и `prisma validate`
+
+Зачем:
+
+- честно закрыть пункт roadmap про `Verification`, а не оставлять его на уровне "UI видно и вроде работает"
+- снизить риск регрессий в materialized alert feed перед переходом к реальному delivery execution
+- удержать документацию в состоянии, где следующий шаг уже действительно начинается с delivery/escalation, а не с добора базового lifecycle coverage
 
 ### Ops alert escalation preview over admin contacts
 

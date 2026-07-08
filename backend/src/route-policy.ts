@@ -7,6 +7,10 @@ import type {
 } from "./types.js";
 
 type FailureDomainComparable = Pick<ServerOption, "provider" | "poolCode" | "asn" | "ipAddress" | "protocol" | "transportProfile">;
+type FailureDomainComparableWithGeo = Pick<
+  ServerOption,
+  "provider" | "poolCode" | "asn" | "ipAddress" | "protocol" | "transportProfile" | "countryCode" | "region"
+>;
 
 export function hasTelemetryContext(context?: TelemetryNetworkContext) {
   return Boolean(
@@ -76,12 +80,39 @@ function hasDifferentProvider(left: FailureDomainComparable, right: FailureDomai
   return left.provider !== right.provider;
 }
 
-function isSameFailureDomain(left: FailureDomainComparable, right: FailureDomainComparable) {
+function hasDifferentPool(left: FailureDomainComparableWithGeo, right: FailureDomainComparableWithGeo) {
+  return left.poolCode !== right.poolCode;
+}
+
+function hasDifferentRegion(left: FailureDomainComparableWithGeo, right: FailureDomainComparableWithGeo) {
+  return left.countryCode !== right.countryCode || left.region !== right.region;
+}
+
+function isSameFailureDomain(left: FailureDomainComparableWithGeo, right: FailureDomainComparableWithGeo) {
   return (
     left.provider === right.provider &&
     left.poolCode === right.poolCode &&
     left.asn === right.asn &&
     left.ipAddress === right.ipAddress
+  );
+}
+
+function isSameRegionalDomain(left: FailureDomainComparableWithGeo, right: FailureDomainComparableWithGeo) {
+  return (
+    left.provider === right.provider &&
+    left.countryCode === right.countryCode &&
+    left.region === right.region &&
+    left.asn === right.asn
+  );
+}
+
+function hasIndependentFailureDomain(left: FailureDomainComparableWithGeo, right: FailureDomainComparableWithGeo) {
+  return (
+    hasDifferentProvider(left, right) ||
+    hasDifferentAsn(left, right) ||
+    hasDifferentIp(left, right) ||
+    hasDifferentPool(left, right) ||
+    hasDifferentRegion(left, right)
   );
 }
 
@@ -155,6 +186,20 @@ function pickBestMatchingServer(
 ) {
   return rankServersForSelection(servers, routeHealthMap, serverOrder).find(
     (server) => !seenEndpointIds.has(server.id) && predicate(server)
+  );
+}
+
+function pickBestMatchingServerWithFallback(
+  servers: ServerOption[],
+  seenEndpointIds: Set<string>,
+  routeHealthMap: Map<string, RouteHealthSnapshotSummary>,
+  serverOrder: Map<string, number>,
+  strictPredicate: (server: ServerOption) => boolean,
+  relaxedPredicate: (server: ServerOption) => boolean
+) {
+  return (
+    pickBestMatchingServer(servers, seenEndpointIds, routeHealthMap, serverOrder, strictPredicate) ??
+    pickBestMatchingServer(servers, seenEndpointIds, routeHealthMap, serverOrder, relaxedPredicate)
   );
 }
 
@@ -309,21 +354,31 @@ export function buildRoutePolicy(input: {
   }
 
   const primary = shortlist[0];
-  const secondChoice = primary
-    ? pickBestMatchingServer(
+  const primaryServer = primary ? input.servers.find((server) => server.id === primary.endpointId) : undefined;
+  const secondChoice = primaryServer
+    ? pickBestMatchingServerWithFallback(
         candidateServers,
         seenEndpointIds,
         routeHealthMap,
         serverOrder,
         (server) =>
-          (hasDifferentTransport(server, primary) && hasDifferentIp(server, primary)) ||
-          (hasDifferentTransport(server, primary) && !isSameFailureDomain(server, primary)) ||
-          hasDifferentIp(server, primary)
+          !isSameRegionalDomain(server, primaryServer) &&
+          ((hasDifferentTransport(server, primaryServer) && hasIndependentFailureDomain(server, primaryServer)) ||
+            hasDifferentIp(server, primaryServer) ||
+            hasDifferentRegion(server, primaryServer) ||
+            hasDifferentPool(server, primaryServer) ||
+            hasDifferentProvider(server, primaryServer) ||
+            hasDifferentAsn(server, primaryServer)),
+        (server) =>
+          (hasDifferentTransport(server, primaryServer) && hasIndependentFailureDomain(server, primaryServer)) ||
+          (hasDifferentTransport(server, primaryServer) && !isSameFailureDomain(server, primaryServer)) ||
+          hasDifferentIp(server, primaryServer) ||
+          hasDifferentRegion(server, primaryServer)
       )
     : undefined;
   appendPolicyCandidate(shortlist, seenEndpointIds, secondChoice, "transport_diagnostic_fallback");
 
-  const diversityAnchor = shortlist[0];
+  const diversityAnchor = primaryServer;
   const providerDiversity = diversityAnchor
     ? pickBestMatchingServer(
         candidateServers,
@@ -332,7 +387,11 @@ export function buildRoutePolicy(input: {
         serverOrder,
         (server) =>
           hasDifferentProvider(server, diversityAnchor) &&
-          (hasDifferentAsn(server, diversityAnchor) || hasDifferentIp(server, diversityAnchor))
+          !isSameRegionalDomain(server, diversityAnchor) &&
+          (hasDifferentAsn(server, diversityAnchor) ||
+            hasDifferentIp(server, diversityAnchor) ||
+            hasDifferentPool(server, diversityAnchor) ||
+            hasDifferentRegion(server, diversityAnchor))
       )
     : undefined;
   appendPolicyCandidate(shortlist, seenEndpointIds, providerDiversity, "provider_diversity_fallback");
@@ -343,12 +402,28 @@ export function buildRoutePolicy(input: {
         seenEndpointIds,
         routeHealthMap,
         serverOrder,
-        (server) => hasDifferentAsn(server, diversityAnchor) || hasDifferentProvider(server, diversityAnchor)
+        (server) =>
+          hasIndependentFailureDomain(server, diversityAnchor) &&
+          !isSameRegionalDomain(server, diversityAnchor) &&
+          (hasDifferentAsn(server, diversityAnchor) ||
+            hasDifferentProvider(server, diversityAnchor) ||
+            hasDifferentPool(server, diversityAnchor) ||
+            hasDifferentRegion(server, diversityAnchor))
       )
     : undefined;
   appendPolicyCandidate(shortlist, seenEndpointIds, asnDiversity, "asn_diversity_fallback");
 
-  for (const server of healthRankedCandidateServers) {
+  const emergencyPreferred = diversityAnchor
+    ? healthRankedCandidateServers.filter(
+        (server) =>
+          !seenEndpointIds.has(server.id) &&
+          hasIndependentFailureDomain(server, diversityAnchor) &&
+          !isSameRegionalDomain(server, diversityAnchor)
+      )
+    : [];
+  const emergencyRemaining = healthRankedCandidateServers.filter((server) => !seenEndpointIds.has(server.id));
+
+  for (const server of [...emergencyPreferred, ...emergencyRemaining]) {
     if (shortlist.length >= 4) {
       break;
     }

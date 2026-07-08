@@ -354,6 +354,10 @@ export function mapUserRowToAdminUserSummary(userRow: AdminUserRow): AdminUserSu
     contact: userRow.contact,
     contactType: userRow.contactType,
     isAdmin: userRow.isAdmin,
+    opsAlertImmediateEnabled: userRow.opsAlertImmediateEnabled,
+    opsAlertDigestEnabled: userRow.opsAlertDigestEnabled,
+    opsAlertEscalationTier:
+      userRow.opsAlertEscalationTier === "secondary" ? "secondary" : "primary",
     status: userRow.status,
     memberSince: userRow.memberSince.toISOString(),
     lastAuthenticatedAt: userRow.authSessions[0]?.lastAuthenticatedAt?.toISOString() ?? null

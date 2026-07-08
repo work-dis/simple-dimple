@@ -6,6 +6,7 @@ import type {
   RouteDecisionOpsNetworkSummary,
   RouteDecisionOpsFailureDomainRecovery,
   RouteDecisionOpsFailureDomainPressure,
+  RouteDecisionOpsInventoryHealth,
   RouteReprobeJobAttemptAuditEntry,
   AccountSummary,
   AdminUserSummary,
@@ -200,6 +201,16 @@ export function formatFailureDomainLabel(
     | RouteDecisionOpsFailureDomainRecovery,
 ): string {
   return `${domain.domainType === "provider" ? "Provider" : "ASN"} · ${domain.label}`;
+}
+
+export function formatInventoryFailedDimensions(
+  health: RouteDecisionOpsInventoryHealth,
+): string {
+  if (!health.failedDimensions.length) {
+    return "Policy satisfied";
+  }
+
+  return health.failedDimensions.join(" · ");
 }
 
 export function formatUserStatus(

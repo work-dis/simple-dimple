@@ -7,6 +7,9 @@ interface Props {
   adminUsers: AdminUserSummary[];
   isSubmitting: boolean;
   onToggleUserAdmin: (user: AdminUserSummary) => void;
+  onToggleImmediateRouting: (user: AdminUserSummary) => void;
+  onToggleDigestRouting: (user: AdminUserSummary) => void;
+  onToggleEscalationTier: (user: AdminUserSummary) => void;
   onReload: () => void;
 }
 
@@ -16,6 +19,9 @@ export function AdminScreen({
   adminUsers,
   isSubmitting,
   onToggleUserAdmin,
+  onToggleImmediateRouting,
+  onToggleDigestRouting,
+  onToggleEscalationTier,
   onReload,
 }: Props) {
   const canView = auth?.isAuthenticated && account?.user.isAdmin;
@@ -24,7 +30,7 @@ export function AdminScreen({
     <>
       <h1>Admin</h1>
       <p className="hint">
-        Небольшой служебный экран для управления admin-доступом без ручной правки БД.
+        Небольшой служебный экран для управления admin-доступом, delivery routing и escalation chain без ручной правки БД.
       </p>
 
       {canView ? (
@@ -74,6 +80,11 @@ export function AdminScreen({
                       ? `Последний вход ${new Date(user.lastAuthenticatedAt).toLocaleString("ru-RU")}`
                       : "Входов пока не было"}
                   </small>
+                  <small>
+                    routing · tier {user.opsAlertEscalationTier} · immediate{" "}
+                    {user.opsAlertImmediateEnabled ? "on" : "off"} · digest{" "}
+                    {user.opsAlertDigestEnabled ? "on" : "off"}
+                  </small>
                   <button
                     className="secondaryButton adminActionButton"
                     onClick={() => void onToggleUserAdmin(user)}
@@ -81,6 +92,31 @@ export function AdminScreen({
                   >
                     {user.isAdmin ? "Снять admin" : "Выдать admin"}
                   </button>
+                  {user.isAdmin ? (
+                    <>
+                      <button
+                        className="ghostButton"
+                        onClick={() => void onToggleEscalationTier(user)}
+                        disabled={isSubmitting}
+                      >
+                        Tier: {user.opsAlertEscalationTier === "primary" ? "Primary" : "Secondary"}
+                      </button>
+                      <button
+                        className="ghostButton"
+                        onClick={() => void onToggleImmediateRouting(user)}
+                        disabled={isSubmitting}
+                      >
+                        Immediate {user.opsAlertImmediateEnabled ? "on" : "off"}
+                      </button>
+                      <button
+                        className="ghostButton"
+                        onClick={() => void onToggleDigestRouting(user)}
+                        disabled={isSubmitting}
+                      >
+                        Digest {user.opsAlertDigestEnabled ? "on" : "off"}
+                      </button>
+                    </>
+                  ) : null}
                 </div>
               ))}
             </div>

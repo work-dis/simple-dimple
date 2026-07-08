@@ -269,6 +269,51 @@ describe("createRouteReprobeWorker", () => {
     await expect(queue.runOnce()).resolves.toBe(true);
     expect(failedMessage).toBe("boom");
   });
+
+  it("refreshes persisted ops alerts even when no job is claimed", async () => {
+    let refreshCount = 0;
+
+    const queue = createRouteReprobeWorker({
+      auth: () => ({
+        id: "auth-1",
+        userId: "user-1",
+        provider: "credentials",
+        status: "active",
+        isAuthenticated: true,
+        lastAuthenticatedAt: null,
+        expiresAt: null
+      }),
+      resolveRouteDecision: async () => ({
+        routeContext: undefined,
+        routeHealth,
+        routePolicy
+      }),
+      recordRouteFeedback: async () => {
+        throw new Error("recordRouteFeedback should not be called");
+      },
+      recordRouteWorkflowSnapshot: async () => {
+        throw new Error("recordRouteWorkflowSnapshot should not be called");
+      },
+      refreshOpsAlerts: async () => {
+        refreshCount += 1;
+      },
+      enqueueJob: async () => {
+        throw new Error("enqueueJob should not be called in runOnce test");
+      },
+      listJobs: async () => [],
+      claimNextJob: async () => null,
+      completeJob: async () => {
+        throw new Error("completeJob should not be called");
+      },
+      failJob: async () => {
+        throw new Error("failJob should not be called");
+      },
+      opsAlertRefreshIntervalMs: 60_000
+    });
+
+    await expect(queue.runOnce()).resolves.toBe(false);
+    expect(refreshCount).toBe(1);
+  });
 });
 
 describe("computeRouteReprobeBackoffMs", () => {

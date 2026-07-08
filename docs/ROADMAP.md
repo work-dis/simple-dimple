@@ -4,6 +4,12 @@
 
 Он нужен для того, чтобы мы не возвращались случайно к старой модели "панели управления" и не раздували интерфейс.
 
+> Текущий приоритетный порядок работ временно переопределён отдельным
+> документом: [PRIORITY_PLAN.md](PRIORITY_PLAN.md) — сначала закрыть
+> OTP-утечку в auth-verification, затем поднять реальный VLESS+REALITY
+> транспорт через Xray, и только потом продолжать Этап 6 в части
+> alerting/escalation ниже.
+
 ## Главный принцип
 
 Приоритет проекта:
@@ -156,6 +162,10 @@
 - persisted `last-known-good route` уже хранится отдельно от assignment, с `network fingerprint` и TTL
 - compact `decision trace` уже добавлен в `routePolicy` как internal metadata без усложнения главного UX
 - shortlist теперь уже старается разносить кандидатов по `provider / ASN / IP`, а trace показывает достигнутый diversity stage
+- transport-diagnostic fallback теперь тоже сначала старается выйти из того же regional domain, а не только сменить transport/IP внутри близкого кластера
+- `Ops` summary теперь тоже считает inventory risk по активным endpoint-ам (`provider / ASN / pool / regional domain`) и поднимает explainable alert, если сам server inventory слишком узкий
+- active inventory теперь уже закреплён как fail-closed policy invariant: backend не продолжает `session/resolve/connect/server` flow, если активный inventory не даёт минимум `3` независимых failure domains по `provider / ASN / region`
+- explainability этого инварианта теперь тоже поднята до явного контракта: `inventoryHealth` возвращает `failedDimensions` и `policyViolationMessage`, а не только агрегатный `riskLevel`
 - feedback-loop для деградировавших маршрутов уже добавлен поверх свежих `probe reports` по текущему `network fingerprint`
 - ranking теперь уже умеет учитывать и похожие сети с контролируемым весом, а retention для telemetry задан явно
 - `route feedback` теперь реально пишет и `route_events`, и зеркальный `probe_report`, а не только notes
@@ -165,19 +175,80 @@
 - persisted worker execution уже умеет `retry/backoff`, stale-lease reclaim и `dead-letter` lifecycle с attempt audit в самом job store
 - execution polling уже физически вынесен из API-процесса в отдельный `worker` entrypoint с общим backend runtime
 - `Ops` теперь уже показывает worker execution dashboard: lifecycle counts, queue lag, worker activity timestamps и recent reprobe jobs
+- `Ops` теперь уже связывает worker execution и route quality через `execution impact`, чтобы было видно, сколько quality-сигналов накопилось после последнего успешного reprobe completion
+- recent reprobe jobs теперь уже дают более явный job-level drilldown: network quality impact, candidate health context и короткий decision-friendly разрез без ручной сверки по raw events
+- поверх этого `Ops` теперь уже поднимает compact alerting/retention summary: active alerts, overall severity и явные retention windows для jobs / route events / probe reports / ranking aggregates
+- persisted `inventory-failure-domain-risk` alert теперь тоже хранит тот же explainable diagnosis, что и summary: `failedDimensions`, policy message и текущие inventory counts materialize-ятся в alert metadata/detail
+- escalation preview и local delivery message для inventory-alert теперь тоже уносят наружу конкретный policy breakdown, а не только общий alert text
+- рядом с attention summary `Ops` теперь уже показывает compact history последних почасовых окон: feedback mix, fallback resolves и job lifecycle signals без отдельного timeline endpoint
+- persisted reprobe jobs теперь уже дают отдельные `worker timeline` и `failure drilldown` секции: chronological audit trail и explainable failure clusters поверх attempt audit
+- history/drilldown слой теперь уже расширен и вширь, и вглубь: появился `daily ops history` поверх hourly окон и отдельные `job network hotspots` по сетям, где реально копятся persisted jobs и quality-сигналы
+- поверх этого `Ops` теперь уже поднимает и `worker-specific` triage layer: compact worker alerts и worker hotspots, чтобы было видно, какой именно worker копит retries, lease churn или dead-letter jobs
+- поверх уже широкого summary `Ops` теперь ещё и выбирает focused triage drilldown для одного `worker`, одной `network` и одного `job trail`, чтобы админ начинал расследование с самого проблемного среза
 
-Ближайшая очередь после этого слоя:
+Ближайшая очередь после этого слоя (заморожена до закрытия Шагов 1-2 из
+[PRIORITY_PLAN.md](PRIORITY_PLAN.md) — OTP-фикс и реальный VLESS+REALITY
+транспорт):
 
-1. связывать job-level execution signals с более подробным ops-наблюдением
-2. после этого углублять admin/ops surface до более явных job-level drilldowns
-3. затем добавлять alerting/retention поверх уже поднятых worker health metrics
+1. решить, нужен ли под этот слой уже реальный внешний alert delivery path
+2. затем уже думать, стоит ли уводить часть ops-наблюдения в ещё более специализированный surface
+3. параллельно продолжать держать focused drilldown и persisted alert semantics синхронизированными, а не превращать их в ещё один непрозрачный dashboard
 
 Практически это значит:
 
 - `POST /api/routes/resolve` уже должен переиспользоваться и online-flow, и background jobs без расхождения логики
 - фоновые jobs уже должны жить в persisted job store, а не как невидимый таймер в памяти
 - worker execution-контракт уже должен переживать ошибки через persisted retries/backoff, reclaim просроченного lease и `dead-letter` fallback
-- следующий шаг — связывать job-level observability с route-quality metrics, чтобы было видно не только "worker тормозит", но и "как это влияет на decisions"
+- следующий шаг — решать, нужен ли поверх текущего focused drilldown уже внешний alert delivery path, а не просто ещё больше summary-карточек
+
+Локально для этого репозитория следующий шаг лучше фиксировать так:
+
+1. подключить реальный `Telegram/email` transport поверх уже работающего local delivery log
+2. решить, нужен ли отдельный batch/digest mode для `watch`-alerts
+3. при необходимости добавить multi-step escalation chains поверх текущего escalation preview и persisted delivery trail
+
+Что сознательно не делаем на этом шаге:
+
+- не переписываем существующий local-first lifecycle `ops_alerts`, потому что storage/feed/preview/delivery baseline уже работает
+- не строим отдельный новый dashboard, пока текущий `Ops` surface еще справляется
+- не раздуваем alerting до полноценного incident-management слоя раньше, чем появится честный внешний delivery path
+
+Рабочий план под этот шаг:
+
+1. **External delivery adapter**
+   Поверх существующего persisted `OpsAlertDelivery` добавить реальный transport-adapter для `Telegram/email`, не ломая local delivery log и explainable execution trail.
+2. **Escalation semantics**
+   Решить, какие alert-ы уходят `immediate`, какие могут копиться в `digest`, и как это связано с текущими `severity/status` и admin contacts.
+3. **Metadata reuse**
+   Сохранять inventory/job-quality diagnosis тем же explainable object (`detail`, metadata, preview message), чтобы внешний delivery не пересобирал смысл alert-а заново.
+4. **Admin controls**
+   При необходимости добавить явные knobs для digest/manual resend/escalation chain, но поверх уже существующего persisted alert lifecycle.
+5. **Verification**
+   Закрыть шаг тестами transport-adapter, retry/failure semantics, message rendering и обновить docs так, чтобы следующий шаг уже обсуждал только более сложные escalation policies, а не базовую доставку.
+
+Критерий готовности этого инкремента:
+
+- alert можно не только увидеть локально, но и реально доставить во внешний канал без потери explainable metadata
+- local delivery log и внешний transport не расходятся по semantics одного и того же alert-а
+- `watch` vs `critical` alerts имеют понятное правило: immediate или digest, а не случайную ручную отправку
+- admin по-прежнему может отследить весь lifecycle alert-а через persisted feed, preview и delivery trail
+
+Текущий прогресс по этому плану:
+
+- `ops_alerts` schema и persisted lifecycle уже добавлены в backend
+- базовый local-first detector уже вынесен в отдельный backend module и materialize-ит alerts в persisted feed без прямой зависимости от `operationalSummary.alerts`
+- admin-only API для `list / acknowledge / snooze / unacknowledge` уже поднят
+- `Ops` UI для persisted alerts feed и lifecycle actions уже тоже поднят
+- persisted alerts теперь дополнительно refresh-ятся из worker/runtime контура, а не только из read-path `GET /api/ops/alerts`
+- escalation preview поверх admin contacts уже тоже поднят, чтобы alert можно было читать как будущий delivery object, а не только как локальную запись
+- local delivery execution поверх preview-слоя теперь тоже поднят: backend materialize-ит persisted delivery log на `POST /api/ops/alerts/:alertId/deliver`, а `Ops` умеет показать recent delivery entries
+- manual retry поверх persisted delivery trail теперь тоже поднят: failed `immediate` attempt можно переотправить как single retry, а failed `digest` attempt переигрывает весь recipient-specific batch одним новым delivery execution trail
+- manual resend для уже успешных delivery entries теперь тоже поднят: delivered `immediate` attempt можно осознанно отправить повторно, а delivered `digest` attempt переигрывает тот же recipient-specific batch без подмены под transport-failure
+- тонкая escalation policy тоже уже начала жить в runtime: обычные `deliver` и `digest-deliver` теперь уважают cooldown по recent successful deliveries, чтобы один и тот же recipient не получал повторный alert слишком часто
+- поверх этого `watch` digest теперь тоже живёт уже не как полностью произвольный ручной batch: digest cadence удерживает recipient-а, если ему уже недавно уходил другой successful `watch` digest, даже когда это уже не тот же самый alert-set
+- поверх cooldown+cadence `watch` digest теперь ещё и уважает quiet window / delivery window: primary tier не уходит вне разрешённых UTC-часов, но secondary after-hours fallback всё ещё может принять batch, если он вообще настроен
+- inventory-policy diagnosis уже тоже проходит через весь alerting контур одинаково: summary, persisted alert tile, alert metadata и escalation/local delivery message используют один и тот же `failedDimensions/policyViolationMessage` contract
+- следующий инкремент теперь уже логично смещается к ещё более гибким escalation rules и, при необходимости, user- or tier-specific windows, а не назад к базовым operator actions или delivery lifecycle
 
 ## Этап 7. Независимые server pools
 

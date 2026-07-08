@@ -1,11 +1,9 @@
-import type { Session, ServerOption, EndpointAssignment, RoutePolicy, Screen } from "../types";
+import type { Session, ServerOption, RoutePolicy, Screen } from "../types";
 import { formatAssignmentReason } from "../lib/formatters";
 
 interface Props {
   session: Session | null;
-  servers: ServerOption[];
   activeServer: ServerOption | undefined;
-  currentAssignment: EndpointAssignment | null;
   routePolicy: RoutePolicy | null;
   authIsAuthenticated: boolean;
   isAdmin: boolean;
@@ -17,9 +15,7 @@ interface Props {
 
 export function HomeScreen({
   session,
-  servers,
   activeServer,
-  currentAssignment,
   routePolicy,
   authIsAuthenticated,
   isAdmin,
@@ -33,15 +29,19 @@ export function HomeScreen({
   return (
     <>
       <h1>Simple Dimple VPN</h1>
-      <p className="hint">Открой. Нажми. Подключись.</p>
+      <p className="hint">
+        {authIsAuthenticated
+          ? "Открой. Нажми. Подключись."
+          : "Войди в аккаунт, чтобы подключиться."}
+      </p>
 
       <div className="hero">
         <button
           className="connectButton"
           onClick={onToggleConnection}
-          disabled={isLoading || isSubmitting}
+          disabled={isLoading || isSubmitting || !authIsAuthenticated}
         >
-          {isSubmitting ? "Обновляем..." : isConnected ? "Отключить" : "Подключить"}
+          {isSubmitting ? "..." : isConnected ? "Отключить" : "Подключить"}
         </button>
 
         <button
@@ -53,30 +53,14 @@ export function HomeScreen({
         </button>
       </div>
 
-      <div className="homeMeta">
-        <div>
-          <span>Регион</span>
-          <strong>{activeServer ? activeServer.region : "—"}</strong>
-        </div>
-        <div>
-          <span>Последнее действие</span>
-          <strong>
-            {session ? new Date(session.updatedAt).toLocaleString("ru-RU") : "—"}
-          </strong>
-        </div>
-        <div>
-          <span>Выданный маршрут</span>
-          <strong>
-            {currentAssignment
-              ? new Date(currentAssignment.assignedAt).toLocaleString("ru-RU")
-              : "—"}
-          </strong>
-        </div>
-        <div>
-          <span>Policy</span>
-          <strong>{formatAssignmentReason(routePolicy?.recommendedReason)}</strong>
-        </div>
-      </div>
+      <p className="homeMeta">
+        {activeServer ? activeServer.region : "—"}
+        {" · "}
+        {session ? new Date(session.updatedAt).toLocaleString("ru-RU") : "—"}
+        {routePolicy?.recommendedReason
+          ? ` · ${formatAssignmentReason(routePolicy.recommendedReason)}`
+          : ""}
+      </p>
 
       <div className="utilityNav" aria-label="Дополнительные разделы">
         <button

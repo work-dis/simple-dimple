@@ -371,6 +371,10 @@ npm run db:wait
 - compact `decision trace` уже тоже добавлен в `routePolicy`
 - более строгие diversity-правила по failure domain уже тоже добавлены
 - `routePolicy.trace` теперь возвращает `diversityStageReached`, `shortlistDistinctProviders` и `shortlistDistinctAsns`
+- transport-diagnostic fallback теперь тоже сначала предпочитает другой regional domain, если рядом есть независимый кандидат
+- `GET /api/ops/route-decisions` теперь ещё и показывает inventory risk по активным endpoint-ам, чтобы узкий server pool был виден как explainable ops signal
+- active inventory теперь уже дополнительно работает как fail-closed policy gate: если активные endpoint-ы не дают минимум `3` независимых domains по `provider / ASN / region`, backend должен вернуть `503`, а не продолжать route resolution как ни в чём не бывало
+- explainability этого gate-а тоже уже закреплена в API: `inventoryHealth` возвращает `failedDimensions` и `policyViolationMessage`, чтобы UI и alerting не пересобирали диагноз вручную
 - feedback-loop для деградировавших маршрутов уже тоже добавлен
 - backend теперь временно избегает endpoint-ов с серией свежих fail/unstable probe results для текущей сети
 - probe telemetry теперь уже поддерживает `failureReason`, а ranking штрафует маршруты по свежести и тяжести failures
@@ -400,37 +404,37 @@ npm run db:wait
 
 Ближайшая очередь разработки сейчас такая:
 
-1. решать, нужен ли поверх текущего focused drilldown отдельный alert delivery path
+1. решать, нужен ли поверх текущего focused drilldown уже реальный внешний alert delivery path
 2. затем уточнять, нужен ли ещё более специализированный ops surface вне текущего summary
-3. держать focused drilldown explainable и не раздувать его до второго dashboard-а
+3. держать focused drilldown и persisted alert semantics explainable и не раздувать их до второго dashboard-а
 
 Практически это значит:
 
 - сделать более явные retention-границы для `probe_reports`, `route_events` и агрегатов
 - начать переиспользовать сигналы похожих сетей без превращения ranking в непрозрачную магию
 - worker execution уже должен переживать ошибки через persisted `nextAttemptAt`, `maxAttempts`, reclaim просроченного lease и `dead-letter`
-- следующий шаг — решать, нужен ли отдельный delivery path для уже появившихся focused alerts/drilldowns
+- следующий шаг — решать, нужен ли внешний delivery path поверх уже существующего local alert/delivery контура
 
 Для локальной разработки это лучше трактовать так:
 
-- сначала делаем delivery path как внутренний persisted alert feed внутри текущего backend/frontend контура
-- acknowledge/snooze state тоже держим локально в БД, чтобы можно было тестировать lifecycle без внешних интеграций
-- внешние каналы доставки оставляем отдельным следующим шагом, если локальный alert feed действительно окажется полезным
+- storage/feed/preview/local-delivery baseline уже считаем сделанным внутри текущего backend/frontend контура
+- acknowledge/snooze state остаётся локально в БД как источник истины для lifecycle и triage
+- следующим шагом уже становятся внешние каналы доставки, digest semantics и escalation chains поверх работающего local trail
 
 Практический порядок работ:
 
-1. Prisma migration под `OpsAlert`
-2. backend detector + store transitions
-3. admin endpoints
-4. `Ops` UI для списка и действий
-5. unit/integration coverage
+1. внешний transport-adapter поверх существующего persisted `OpsAlertDelivery`
+2. правила `immediate` vs `digest` для `critical/watch` alerts
+3. message rendering без потери explainable metadata (`failedDimensions`, counts, policy messages)
+4. при необходимости admin controls для resend/digest/escalation chain поверх уже существующего lifecycle
+5. unit/integration coverage для transport/failure semantics
 
 Минимальный локальный сценарий приемки:
 
 - сгенерировать деградационный сигнал через существующие `route_events` / `route_reprobe_jobs`
-- увидеть новый persisted alert в `GET /api/ops/alerts`
-- отметить его как `acknowledged` или `snoozed`
-- перезагрузить backend/UI и убедиться, что lifecycle сохранился
+- увидеть materialized alert и его explainable metadata в `GET /api/ops/alerts`
+- получить escalation preview с тем же diagnosis, что и в persisted alert/detail
+- выполнить delivery и убедиться, что local trail и внешний transport не расходятся по смыслу alert-а
 
 Что уже сделано:
 
@@ -441,8 +445,19 @@ npm run db:wait
 - отдельный detector module для alert rules
 - фоновый refresh persisted alerts из worker/runtime контура, чтобы lifecycle не зависел только от `GET /api/ops/alerts`
 - escalation preview поверх admin contacts, чтобы triage уже видел, кому и по какому каналу ушёл бы alert
+- local delivery execution поверх preview-слоя: backend пишет persisted delivery log, а `Ops` умеет запускать `deliver` и читать recent deliveries
+- внешний transport-adapter тоже уже поднят: `email` можно отправлять через `Resend API`, а `Telegram` через `Bot API`, при этом каждая попытка всё равно фиксируется в persisted `OpsAlertDelivery`
+- delivery semantics тоже уже зафиксированы жёстко: `critical` alerts идут через direct send, а `watch` alerts можно отправить только через общий digest batch
+- admin routing controls тоже уже подняты: для каждого admin можно отдельно включать `immediate` и `digest`, а также назначать `primary/secondary` escalation tier
+- critical delivery теперь использует явный `primary -> secondary` chain: secondary-step отправка включается только если primary path не сработал или пуст
+- manual retry controls тоже уже подняты: failed direct delivery можно переиграть как один retry, а failed digest delivery повторяет весь recipient-specific batch одним новым persisted execution trail
+- manual resend controls теперь тоже уже подняты: delivered direct entry можно отправить повторно как осознанное operator-действие, а delivered digest entry повторяет тот же recipient-specific batch без искусственного failure-path
+- automatic delivery path теперь тоже уже уважает cooldown policy: `deliver` и `digest-deliver` удерживают recipient-а, если по этому alert/feed у него уже был недавний successful delivery; ручные `retry/resend` при этом остаются explicit bypass
+- `watch` digest cadence теперь тоже уже включён: даже если cooldown по конкретному alert-у не сработал, backend удерживает recipient-а от слишком частых digest batch-ей по всему `watch` feed и пропускает только тех, кто cadence-window уже пережил
+- `watch` digest quiet window теперь тоже уже включён: primary digest recipients удерживаются вне разрешённого UTC-окна, но secondary after-hours tier всё ещё может принять batch; если secondary-tier нет, backend возвращает явный hold
+- inventory-failure-domain-risk теперь проходит через тот же explainable контур целиком: summary, persisted alert tile, alert metadata и escalation/local delivery message показывают одни и те же `failedDimensions` и policy message
 
 Что остаётся следующим:
 
-- реальный delivery execution поверх уже работающего feed и escalation preview
-- при необходимости более явные escalation chains, если одного preview-слоя окажется мало
+- при необходимости user- or tier-specific quiet windows поверх текущего global after-hours fallback
+- при необходимости ещё более тонкая escalation policy поверх текущего `primary -> secondary` chain

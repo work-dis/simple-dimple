@@ -218,6 +218,88 @@
 - `(user_id, network_fingerprint_id, last_succeeded_at desc)`
 - `(endpoint_id, last_succeeded_at desc)`
 
+## 4. Ops schema
+
+### Таблица `ops.ops_alerts`
+
+Что хранит:
+
+- persisted triage-объекты для ops-наблюдения
+- lifecycle alert-а отдельно от сырого observation trail
+- acknowledge/snooze/resolution state, который нельзя надежно держать только в вычисляемом summary
+
+Ключевые поля:
+
+- `id uuid primary key`
+- `alert_type text not null`
+- `severity text not null`
+- `status text not null`
+- `dedupe_key text unique not null`
+- `title text not null`
+- `detail text not null`
+- `metadata jsonb not null default '{}'`
+- `started_at timestamptz not null`
+- `last_detected_at timestamptz not null`
+- `acknowledged_at timestamptz`
+- `resolved_at timestamptz`
+- `snoozed_until timestamptz`
+- `created_at timestamptz not null`
+- `updated_at timestamptz not null`
+
+Индексы:
+
+- `(status, updated_at desc)`
+- `(severity, status, updated_at desc)`
+- `(last_detected_at desc)`
+
+Комментарии:
+
+- `dedupe_key` нужен, чтобы detector обновлял уже существующий alert, а не плодил дубликаты на каждый пересчет summary
+- `status` на текущем этапе достаточно ограничить значениями вроде `active`, `acknowledged`, `snoozed`, `resolved`
+- `metadata` полезно держать как легкий explainable context, а не как замену сырым `route_events` или `route_reprobe_jobs`
+
+### Таблица `ops.ops_alert_deliveries`
+
+Что хранит:
+
+- persisted execution log для ручной или фоновой доставки ops alert-а
+- recipient snapshot на момент доставки, чтобы triage не зависел от будущих изменений admin contact-а
+- связь между `OpsAlert` и фактом delivery execution, а не только preview-расчётом
+
+Ключевые поля:
+
+- `id uuid primary key`
+- `ops_alert_id uuid not null`
+- `batch_id uuid not null`
+- `channel text not null`
+- `escalation_level text not null`
+- `status text not null`
+- `recipient_user_id uuid`
+- `recipient_display_name text not null`
+- `recipient_contact text not null`
+- `subject text not null`
+- `message text not null`
+- `reason text not null`
+- `delivery_path text not null`
+- `provider_message_id text`
+- `actor_user_id uuid`
+- `delivered_at timestamptz`
+- `metadata jsonb not null default '{}'`
+- `created_at timestamptz not null`
+- `updated_at timestamptz not null`
+
+Индексы:
+
+- `(ops_alert_id, created_at desc)`
+- `(batch_id)`
+- `(status, created_at desc)`
+
+Комментарии:
+
+- `batch_id` связывает один delivery запуск с несколькими recipients, чтобы UI видел не только отдельные строки, но и единый execution burst
+- `delivery_path` на текущем этапе фиксирует local-dev delivery layer, не pretending, что у нас уже есть реальный SMTP или Telegram bot delivery
+- этот log сознательно хранит snapshot `subject/message/contact`, чтобы explainable ops trail не зависел от изменения preview logic задним числом
+
 ## 2. Telemetry schema
 
 Это слой сырых клиентских отчётов.
@@ -477,10 +559,19 @@
 Рекомендуемая стартовая политика:
 
 - `core.*` — хранить до удаления аккаунта и истечения юридического/операционного окна
-- `telemetry.probe_reports` — короткий retention, например `30-90` дней
-- `telemetry.route_events` — `30-90` дней, если это не security/audit событие
-- `analytics.route_success_rollups` — дольше, например `180-365` дней
+- `telemetry.probe_reports` — короткий retention, на текущем этапе `45` дней
+- `telemetry.route_events` — `45` дней для explainable route-quality trail, если это не security/audit событие
+- `ops.route_reprobe_jobs` — `14` дней для execution lifecycle и attempt audit, если отдельная security-политика не требует большего окна
+- `analytics.route_success_rollups` — `180` дней
+- `analytics.route_rankings` — `180` дней
 - `ops.audit_logs` — дольше, по admin/security политике
+
+Текущая ops-логика alerting исходит из того, что:
+
+- `dead_letter` jobs и stale `running` jobs считаются `critical`
+- overdue `queued` jobs считаются `watch`
+- накопление quality events после последнего успешного reprobe completion поднимает `watch/critical` в зависимости от execution impact
+- SLA breaches тоже участвуют в общем attention summary, чтобы worker и route-quality signals читались в одном слое
 
 ## Когда разносить физически
 
@@ -512,6 +603,7 @@
 - `Prisma` уже добавлен в backend
 - initial schema для `session`, `users`, `subscriptions`, `devices` уже зафиксирована
 - auth foundation уже добавила `AuthSession`, `contactType` и `user status`
+- users теперь уже также хранят alert-routing knobs для ops-контура: `opsAlertImmediateEnabled`, `opsAlertDigestEnabled`, `opsAlertEscalationTier`
 - initial SQL migration уже сгенерирована
 - runtime backend уже работает только через `Prisma/PostgreSQL`
 - `core.server_pools` и `core.endpoints` уже подняты в runtime

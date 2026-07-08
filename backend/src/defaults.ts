@@ -1,4 +1,5 @@
 import type { AccountSummary, AuthSessionSummary, ServerOption, SessionState } from "./types.js";
+import { getInventoryPolicyViolation, summarizeInventoryHealth } from "./inventory-policy.js";
 
 export const defaultServerPools = [
   {
@@ -33,12 +34,12 @@ export const defaultServerPools = [
 export const defaultEndpoints: ServerOption[] = [
   {
     id: "de-fra-1",
-    label: "Frankfurt Alpha",
+    label: "Frankfurt Alpha (dev Xray inbound)",
     region: "Germany",
     countryCode: "DE",
     provider: "Hetzner",
     asn: 24940,
-    ipAddress: "203.0.113.10",
+    ipAddress: "127.0.0.1",
     poolCode: "fra-a",
     protocol: "vless",
     transportProfile: "reality-tcp",
@@ -95,6 +96,37 @@ export const defaultEndpointDetails = [
     city: "Warsaw"
   }
 ] as const;
+
+// Значения соответствуют inbound из deploy/xray/dev-config.json — это единственный
+// endpoint с реальным (не RFC5737) IP и рабочим локальным Xray-процессом, остальные
+// endpoint-ы в этом файле остаются только vitrine-данными без живого транспорта.
+export const defaultEndpointTransportConfigs = [
+  {
+    endpointId: "de-fra-1",
+    port: 8443,
+    publicKey: "-9ABqsGJOl9OQEqG2KISZlHW3ePa2mHuCivT892kFh0",
+    shortId: "1840a5c9",
+    sni: "www.microsoft.com",
+    fingerprint: "chrome",
+    flow: "xtls-rprx-vision"
+  }
+] as const;
+
+const defaultInventoryHealth = summarizeInventoryHealth(
+  defaultEndpointDetails.map((endpoint) => ({
+    endpointId: endpoint.id,
+    provider: endpoint.provider,
+    asn: endpoint.asn,
+    poolCode: endpoint.poolCode,
+    countryCode: endpoint.countryCode,
+    region: endpoint.region
+  }))
+);
+const defaultInventoryPolicyViolation = getInventoryPolicyViolation(defaultInventoryHealth);
+
+if (defaultInventoryPolicyViolation) {
+  throw new Error(`Default server inventory is misconfigured. ${defaultInventoryPolicyViolation}`);
+}
 
 export const serverOptions: ServerOption[] = defaultEndpoints;
 

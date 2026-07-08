@@ -32,5 +32,16 @@ services:
       - ./:/workspace
     command: sh -c "npm install && npm run prisma:generate --workspace backend && npm run start:worker --workspace backend"
 
+  xray:
+    image: ghcr.io/xtls/xray-core:latest
+    container_name: simple-dimple-xray-dev
+    profiles: ["xray"]
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./deploy/xray/dev-config.json:/etc/xray/config.json:ro
+    command: ["run", "-config", "/etc/xray/config.json"]
+
 volumes:
   postgres_data:

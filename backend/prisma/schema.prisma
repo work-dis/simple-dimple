@@ -41,6 +41,23 @@ enum VerificationChallengeStatus {
   expired
 }
 
+enum OpsAlertSeverity {
+  watch
+  critical
+}
+
+enum OpsAlertStatus {
+  active
+  acknowledged
+  snoozed
+  resolved
+}
+
+enum OpsAlertDeliveryStatus {
+  delivered
+  failed
+}
+
 model AppSession {
   id             String   @id
   status         String
@@ -77,9 +94,14 @@ model Endpoint {
   latencyMs        Int
   loadPercent      Int
   isActive         Boolean    @default(true)
+  lastHealthCheckAt DateTime?
+  lastHealthCheckOk Boolean?
+  lastHealthCheckLatencyMs Int?
+  consecutiveHealthFailures Int @default(0)
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
   serverPool       ServerPool @relation(fields: [serverPoolId], references: [id], onDelete: Cascade)
+  transportConfig  EndpointTransportConfig?
   probeReports     ProbeReport[]
   routeSuccessRollups RouteSuccessRollup[]
   routeRankings    RouteRanking[]
@@ -92,12 +114,33 @@ model Endpoint {
   @@index([asn, countryCode])
 }
 
+// REALITY transport-параметры конкретного inbound. Отдельная таблица, а не поля
+// на Endpoint, потому что не у всех endpoint-ов (trojan/shadowsocks в defaults.ts)
+// есть REALITY-транспорт вообще.
+model EndpointTransportConfig {
+  id          String   @id
+  endpointId  String   @unique
+  port        Int
+  publicKey   String
+  shortId     String
+  sni         String
+  fingerprint String   @default("chrome")
+  flow        String   @default("xtls-rprx-vision")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  endpoint    Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+}
+
 model User {
   id            String         @id
   displayName   String
   contact       String
   contactType   ContactType
   isAdmin       Boolean        @default(false)
+  vlessUuid     String?        @unique
+  opsAlertImmediateEnabled Boolean @default(true)
+  opsAlertDigestEnabled    Boolean @default(true)
+  opsAlertEscalationTier   String  @default("primary")
   status        UserStatus
   memberSince   DateTime
   createdAt     DateTime       @default(now())
@@ -212,6 +255,7 @@ model VerificationChallenge {
   target      String
   codeHash    String
   status      VerificationChallengeStatus
+  attempts    Int                         @default(0)
   expiresAt   DateTime
   consumedAt  DateTime?
   createdAt   DateTime                    @default(now())
@@ -268,6 +312,56 @@ model RouteReprobeJob {
   @@index([status, nextAttemptAt])
   @@index([leaseExpiresAt])
   @@index([createdAt(sort: Desc)])
+}
+
+model OpsAlert {
+  id             String           @id
+  alertType      String
+  severity       OpsAlertSeverity
+  status         OpsAlertStatus
+  dedupeKey      String           @unique
+  title          String
+  detail         String
+  metadata       Json             @default("{}")
+  startedAt      DateTime
+  lastDetectedAt DateTime
+  acknowledgedAt DateTime?
+  resolvedAt     DateTime?
+  snoozedUntil   DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  deliveries     OpsAlertDelivery[]
+
+  @@index([status, updatedAt(sort: Desc)])
+  @@index([severity, status, updatedAt(sort: Desc)])
+  @@index([lastDetectedAt(sort: Desc)])
+}
+
+model OpsAlertDelivery {
+  id                   String                 @id
+  opsAlertId           String
+  batchId              String
+  channel              ContactType
+  escalationLevel      String
+  status               OpsAlertDeliveryStatus
+  recipientUserId      String?
+  recipientDisplayName String
+  recipientContact     String
+  subject              String
+  message              String
+  reason               String
+  deliveryPath         String
+  providerMessageId    String?
+  actorUserId          String?
+  deliveredAt          DateTime?
+  metadata             Json                   @default("{}")
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  opsAlert             OpsAlert               @relation(fields: [opsAlertId], references: [id], onDelete: Cascade)
+
+  @@index([opsAlertId, createdAt(sort: Desc)])
+  @@index([batchId])
+  @@index([status, createdAt(sort: Desc)])
 }
 
 model ProbeReport {

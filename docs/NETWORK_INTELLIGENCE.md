@@ -246,9 +246,16 @@ Ranking учитывает:
 Минимальные правила shortlist:
 
 - кандидат `#1`: лучший last-known-good или лучший по текущей сети
-- кандидат `#2`: другой transport или другой `IP` в близком failure domain для быстрой диагностики
+- кандидат `#2`: по возможности уже другой regional/failure domain; если это недоступно, тогда другой transport или другой `IP` для быстрой диагностики
 - кандидат `#3`: другой provider или `ASN`
 - кандидат `#4+`: emergency paths
+
+Минимальные правила для active inventory:
+
+- shortlist diversity не должен зависеть только от удачных seed-данных
+- активный inventory должен явно держать минимум `3` независимых failure domains по `provider / ASN / region`
+- если этот минимум не выполняется, backend должен fail-closed останавливать `resolve/session/connect/server` flow, а не молча продолжать выдачу узкого пула
+- explainable ops-слой должен показывать не только `riskLevel`, но и конкретный breakdown policy failure: `failedDimensions` и готовый `policyViolationMessage`
 
 ## 7. Control plane и telemetry plane
 

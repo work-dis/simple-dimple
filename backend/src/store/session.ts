@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { PrismaClient } from "../generated/prisma/client.js";
 import { ContactType, AuthProvider, AuthSessionStatus, SubscriptionStatus, UserStatus } from "../generated/prisma/client.js";
+import { getInventoryPolicyViolation, summarizeInventoryHealth } from "../inventory-policy.js";
 import type {
   AuthSessionSummary,
   EndpointAssignmentSummary,
@@ -107,6 +108,21 @@ export function createSessionStore(prisma: PrismaClient) {
         ]
       });
       const serverOptions = endpointRows.map((endpointRow) => mapEndpointRowToServerOption(endpointRow));
+      const inventoryHealth = summarizeInventoryHealth(
+        serverOptions.map((server) => ({
+          endpointId: server.id,
+          provider: server.provider,
+          asn: server.asn,
+          poolCode: server.poolCode,
+          countryCode: server.countryCode,
+          region: server.region
+        }))
+      );
+      const inventoryPolicyViolation = getInventoryPolicyViolation(inventoryHealth);
+
+      if (inventoryPolicyViolation) {
+        throw new StoreAuthError(`Active server inventory is not policy-compliant. ${inventoryPolicyViolation}`, 503);
+      }
 
       if (!context) {
         return serverOptions;

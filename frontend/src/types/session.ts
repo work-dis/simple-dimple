@@ -23,12 +23,30 @@ export type EndpointAssignment = {
   expiresAt: string | null;
 };
 
+export type ConnectionConfigSummary = {
+  endpointId: string;
+  protocol: "vless";
+  security: "reality";
+  uri: string;
+  params: {
+    uuid: string;
+    address: string;
+    port: number;
+    flow: string;
+    sni: string;
+    fingerprint: string;
+    publicKey: string;
+    shortId: string;
+  };
+};
+
 export type SessionResponse = {
   session: Session;
   servers?: ServerOption[];
   currentAssignment: EndpointAssignment | null;
   routeHealth: RouteHealthSnapshot[];
   routePolicy: RoutePolicy;
+  connectionConfig?: ConnectionConfigSummary | null;
 };
 
 export type NavigatorConnectionLike = {

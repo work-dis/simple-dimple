@@ -12,7 +12,6 @@ export type AuthSession = {
 
 export type AuthChallenge = {
   challengeId: string;
-  code: string;
   provider: VerificationProvider;
   target: string;
   expiresAt: string;

@@ -85,12 +85,20 @@ Backend отвечает за:
 - текущий dev-контур уже использует request-scoped `AuthSession` через `x-auth-session-id`
 - frontend хранит `auth.id` локально и отправляет его в каждый API-запрос
 - это не финальная cookie/session архитектура, но уже убирает самый опасный баг класса "один пользователь логинится за другого из-за общего состояния процесса"
+- data-plane (`GET /api/session`, `POST /api/routes/resolve`, `POST /api/connect`, `POST /api/server`, `POST /api/telemetry/probe`, `POST /api/routes/feedback`) закрыт тем же `requireAuthenticatedAuthSession`, что и admin/ops — анониму отдаётся `401`, чтобы не утекал каталог нод и нельзя было отравлять route-ranking (см. [DECISIONS.md, Decision 022](DECISIONS.md))
+- `AuthSession` имеет абсолютный TTL (`authSessionTtlMs`), а не живёт вечно; просроченная сессия на чтении сама переходит в `expired`
+- **известное ограничение:** `AppSession` (`status`/`activeServerId`/`connectCount`) — всё ещё глобальный singleton `id: "primary"`, общий для всех пользователей. Это уже не утечка per-user данных (реальные `connectionConfig`/assignments/`LastKnownGoodRoute` привязаны к `userId`), а вопрос корректности общего статуса; полноценный per-user session state завязан на реальный транспорт из [PRIORITY_PLAN.md, Шаг 2](PRIORITY_PLAN.md)
 
 Для `email verification` и `Telegram auth` на dev-этапе уже выделен отдельный challenge-based слой:
 
 - `VerificationChallenge` хранится в `PostgreSQL`
 - backend выдает одноразовый код и подтверждает его отдельным шагом
-- локальный стенд пока показывает код прямо в UI, а не доставляет его через внешние сервисы
+- HTTP-ответ на `POST /api/auth/challenge` никогда не содержит plaintext `code` —
+  код доставляется через переиспользуемый транспорт-модуль
+  `backend/src/transport/message-transport.ts` (Resend для email, Telegram Bot API
+  для telegram; тот же модуль использует и ops-alert delivery)
+- если ни один транспорт не сконфигурирован, код пишется только в server log
+  (`console.info`), а не отдается клиенту — см. [DECISIONS.md, Decision 020](DECISIONS.md)
 
 Даже до появления БД мы уже явно выделяем сущности:
 
@@ -111,6 +119,26 @@ DB-слой уже добавлен в кодовую базу:
 - `ServerPool` для независимых failure domains
 - `Endpoint` для конкретных IP/маршрутов
 - текущий `Server`-экран получает каталог уже из БД, а не из frontend/static-константы
+
+Поверх `Endpoint` есть и реальный transport-слой, а не только метаданные:
+
+- `EndpointTransportConfig` (1:1 с `Endpoint`) хранит REALITY-параметры конкретного
+  inbound: порт, `publicKey`, `shortId`, `sni`, `fingerprint`, `flow`; это отдельная
+  таблица, а не поля на `Endpoint`, потому что не все endpoint-ы в `defaults.ts`
+  используют REALITY (`trojan`/`shadowsocks` в текущем dev-инвентаре — нет)
+- `User.vlessUuid` — стабильный per-user VLESS client id, генерируется лениво при
+  первой выдаче конфига и переиспользуется дальше
+- `backend/src/connection-config.ts` строит настоящий `vless://...` connection URI
+  из этих данных; `POST /api/routes/resolve` и `POST /api/connect` отдают его в поле
+  `connectionConfig` (или `null`, если endpoint/пользователь не подходят)
+- единственный сейчас endpoint с реальным (не RFC5737) transport — `de-fra-1`,
+  указывает на локальный dev-Xray inbound из `deploy/xray/dev-config.json`
+  (`docker compose --profile xray up`); подробности и explicit non-production
+  предупреждение — в [deploy/xray/README.md](../deploy/xray/README.md)
+- **важно:** сама `PWA` этот туннель поднять не может — она только показывает
+  `connectionConfig`; реальное соединение проверяется reference-клиентом
+  (`xray-core` CLI / v2rayN / NekoBox) до появления native-обвязки, см.
+  [DECISIONS.md, Decision 021](DECISIONS.md)
 
 Текущий runtime работает только через `PostgreSQL`:
 
@@ -396,7 +424,10 @@ network_fingerprint × endpoint_ip × protocol_profile × time_window
 - `assignmentReason` теперь отражает источник выбора: `manual_override`, `last_known_good`, `network_ranking_primary`, `provider_diversity_fallback` и т.д.
 - successful `connect` теперь пишет отдельную `last-known-good` запись, и policy читает ее как более надежный источник, чем текущий assignment
 - `routePolicy.trace` теперь также возвращает компактную internal explainability metadata: `selectedBy`, `usedLastKnownGood`, `usedNetworkRanking`, `fallbackTier`
-- shortlist selection теперь учитывает failure domain сильнее: transport-diagnostic шаг предпочитает другой `IP`/transport, а diversity fallback старается разнести кандидатов по `provider` и `ASN`
+- shortlist selection теперь учитывает failure domain сильнее: transport-diagnostic шаг по возможности уходит в другой regional domain, а diversity fallback старается разнести кандидатов по `provider` и `ASN`
+- ops/admin слой теперь также считает inventory health по активным endpoint-ам и server pools, чтобы риск слабого failure-domain inventory был виден ещё до реальной деградации
+- поверх этого active inventory теперь уже закреплён как fail-closed invariant на store/runtime-слое: если активные endpoint-ы не дают хотя бы `3` независимых failure domains по `provider / ASN / region`, backend не должен продолжать `resolve/session/connect/server` flow
+- inventory health теперь является не только aggregate signal, но и explainable contract: `failedDimensions` и `policyViolationMessage` должны быть доступны одинаково для summary, persisted alerts и escalation/delivery paths
 - поверх этого policy теперь читает свежие `probe_reports` для текущего `networkFingerprint` и временно избегает endpoint-ов с серией недавних неуспешных результатов
 - ranking поверх тех же данных теперь штрафует маршруты по свежести, типу failure и силе сигнала, а не только по усреднённому fail-rate
 - рядом с этим backend теперь строит `routeHealth` snapshots: компактный health-слой для policy с `penaltyScore`, `confidence`, `dominantFailureReason` и `status`
@@ -466,12 +497,20 @@ network_fingerprint × endpoint_ip × protocol_profile × time_window
 - alert rules уже вынесены в отдельный detector module
 - persisted alert refresh уже дополнительно вынесен в worker/runtime contour, а не остаётся только частью summary-read path
 - поверх этого уже появился escalation preview layer: backend умеет посчитать recipients/channels для alert-а по admin contacts без прямой внешней отправки
+- local delivery execution теперь тоже поднят: backend materialize-ит persisted `OpsAlertDelivery` log по admin recipients, а frontend умеет запускать delivery и читать последние entries
+- admin routing controls теперь тоже являются частью user-model: у admin можно отдельно включать `immediate` и `digest` delivery, а также выбирать `primary/secondary` escalation tier
+- критический alert теперь проходит через явный chain `primary -> secondary`: backend не дублирует отправку всем сразу, а идёт ко второму tier только если первый шаг дал сбой или там нет активных recipients
+- failed delivery entries теперь тоже являются частью ops lifecycle, а не тупиком: `immediate` retry переиспользует исходный delivery payload, а `digest` retry восстанавливает весь recipient-specific batch и повторяет его одним transport call
+- delivered delivery entries теперь тоже не являются тупиком: operator может вручную сделать resend успешной записи, и backend сохранит это как отдельный replay trail, а не замаскирует под failure-driven retry
+- обычный automatic delivery path теперь тоже имеет минимальную anti-spam policy: recent successful deliveries удерживают того же recipient-а внутри cooldown window, а operator-driven `retry/resend` остаются явным override
+- `watch` digest path поверх этого уже имеет и batch-level cadence: recipient может выйти из cooldown по конкретному alert-у, но всё равно не получить новый digest слишком рано, если совсем недавно уже был другой successful watch batch
+- `watch` digest path теперь ещё и подчиняется delivery window: primary tier не отправляется вне разрешённых UTC-часов, но secondary after-hours fallback может всё ещё принять batch, если нужен ночной follow-up
+- для `inventory-failure-domain-risk` persisted alert и escalation-preview/delivery message теперь обязаны нести тот же policy diagnosis, что и `inventoryHealth`: counts, failed dimensions и готовый violation message без повторного пересчёта в UI
 
 Что оставляем следующим этапам:
 
-- внешние delivery-каналы
-- escalation chains
-- расписания уведомлений, digest mode и multi-recipient routing
+- более сложные escalation chains поверх текущего `primary -> secondary`
+- user- or tier-specific quiet windows и ещё более гибкие escalation rules поверх уже работающего cooldown/cadence/window/replay-layer
 
 ## 7. Frontend
 

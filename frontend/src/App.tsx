@@ -48,11 +48,21 @@ function App() {
   /* ──────────── Effects ──────────── */
 
   useEffect(() => {
-    void Promise.all([
-      routeSession.loadSession(),
-      authAccount.loadAuthAccount(),
-    ]);
+    void authAccount.loadAuthAccount();
   }, []);
+
+  // Data-plane (/api/session и др.) требует аутентификацию. Грузим сессию только
+  // когда пользователь вошёл; при signed-out — сбрасываем, а не показываем 401.
+  useEffect(() => {
+    if (authAccount.isLoading) {
+      return;
+    }
+    if (authAccount.isAuthenticated) {
+      void routeSession.loadSession();
+    } else {
+      routeSession.resetSession();
+    }
+  }, [authAccount.isAuthenticated, authAccount.isLoading]);
 
   useEffect(() => {
     if (
@@ -126,9 +136,7 @@ function App() {
         {screen === "home" && (
           <HomeScreen
             session={routeSession.session}
-            servers={routeSession.servers}
             activeServer={routeSession.activeServer}
-            currentAssignment={routeSession.currentAssignment}
             routePolicy={routeSession.routePolicy}
             authIsAuthenticated={authAccount.isAuthenticated}
             isAdmin={authAccount.isAdmin}
@@ -159,6 +167,9 @@ function App() {
             adminUsers={adminUsers.adminUsers}
             isSubmitting={isSubmitting}
             onToggleUserAdmin={adminUsers.toggleUserAdmin}
+            onToggleImmediateRouting={adminUsers.toggleImmediateRouting}
+            onToggleDigestRouting={adminUsers.toggleDigestRouting}
+            onToggleEscalationTier={adminUsers.toggleEscalationTier}
             onReload={adminUsers.loadAdminUsers}
           />
         )}
@@ -170,12 +181,18 @@ function App() {
             routeDecisionOps={routeDecisionOps.routeDecisionOps}
             opsAlerts={routeDecisionOps.opsAlerts}
             opsAlertEscalationPreviews={routeDecisionOps.opsAlertEscalationPreviews}
+            opsAlertDeliveries={routeDecisionOps.opsAlertDeliveries}
             isSubmitting={isSubmitting}
             onReload={routeDecisionOps.loadRouteDecisionOps}
             onAcknowledgeAlert={routeDecisionOps.acknowledgeOpsAlert}
             onSnoozeAlert={routeDecisionOps.snoozeOpsAlert}
             onUnacknowledgeAlert={routeDecisionOps.unacknowledgeOpsAlert}
             onLoadEscalationPreview={routeDecisionOps.loadOpsAlertEscalationPreview}
+            onLoadAlertDeliveries={routeDecisionOps.loadOpsAlertDeliveries}
+            onDeliverAlert={routeDecisionOps.deliverOpsAlert}
+            onRetryAlertDelivery={routeDecisionOps.retryOpsAlertDelivery}
+            onResendAlertDelivery={routeDecisionOps.resendOpsAlertDelivery}
+            onDeliverAlertDigest={routeDecisionOps.deliverOpsAlertDigest}
           />
         )}
 

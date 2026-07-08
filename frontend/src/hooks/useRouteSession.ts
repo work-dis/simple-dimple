@@ -1,8 +1,9 @@
 import { useState } from "react";
 
-import { readJson } from "../lib";
+import { HttpError, readJson } from "../lib";
 import { buildRouteContext, submitProbeReport } from "../lib/network";
 import type {
+  ConnectionConfigSummary,
   EndpointAssignment,
   RouteHealthSnapshot,
   RoutePolicy,
@@ -26,10 +27,25 @@ export function useRouteSession({
     useState<EndpointAssignment | null>(null);
   const [routeHealth, setRouteHealth] = useState<RouteHealthSnapshot[]>([]);
   const [routePolicy, setRoutePolicy] = useState<RoutePolicy | null>(null);
+  const [connectionConfig, setConnectionConfig] =
+    useState<ConnectionConfigSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Data-plane эндпоинты (/api/session, /api/connect, /api/server) теперь требуют
+  // аутентификацию, поэтому signed-out состояние — это не ошибка, а пустой сброс.
+  function resetSession() {
+    setSession(null);
+    setServers([]);
+    setCurrentAssignment(null);
+    setRouteHealth([]);
+    setRoutePolicy(null);
+    setConnectionConfig(null);
+    setIsLoading(false);
+  }
+
   async function loadSession() {
+    setIsLoading(true);
     try {
       onClearError();
       const sessionQuery = new URLSearchParams(
@@ -45,6 +61,10 @@ export function useRouteSession({
       setRouteHealth(data.routeHealth);
       setRoutePolicy(data.routePolicy);
     } catch (nextError) {
+      if (nextError instanceof HttpError && nextError.status === 401) {
+        resetSession();
+        return;
+      }
       onError(nextError instanceof Error ? nextError.message : "Unknown error");
     } finally {
       setIsLoading(false);
@@ -65,13 +85,20 @@ export function useRouteSession({
       setCurrentAssignment(data.currentAssignment);
       setRouteHealth(data.routeHealth);
       setRoutePolicy(data.routePolicy);
+      setConnectionConfig(data.connectionConfig ?? null);
 
       if (data.session.status === "connected") {
         const nextServer = servers.find((server) => server.id === data.session.activeServerId);
         if (nextServer) void submitProbeReport(nextServer);
       }
     } catch (nextError) {
-      onError(nextError instanceof Error ? nextError.message : "Unknown error");
+      onError(
+        nextError instanceof HttpError && nextError.status === 401
+          ? "Нужно войти в аккаунт, чтобы подключиться"
+          : nextError instanceof Error
+            ? nextError.message
+            : "Unknown error",
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -91,13 +118,20 @@ export function useRouteSession({
       setCurrentAssignment(data.currentAssignment);
       setRouteHealth(data.routeHealth);
       setRoutePolicy(data.routePolicy);
+      setConnectionConfig(data.connectionConfig ?? null);
 
       if (data.session.status === "connected") {
         const nextServer = servers.find((server) => server.id === serverId);
         if (nextServer) void submitProbeReport(nextServer);
       }
     } catch (nextError) {
-      onError(nextError instanceof Error ? nextError.message : "Unknown error");
+      onError(
+        nextError instanceof HttpError && nextError.status === 401
+          ? "Нужно войти в аккаунт, чтобы сменить сервер"
+          : nextError instanceof Error
+            ? nextError.message
+            : "Unknown error",
+      );
     } finally {
       setIsSubmitting(false);
     }
@@ -112,9 +146,11 @@ export function useRouteSession({
     currentAssignment,
     routeHealth,
     routePolicy,
+    connectionConfig,
     isLoading,
     isSubmitting,
     loadSession,
+    resetSession,
     toggleConnection,
     changeServer,
   };

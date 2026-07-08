@@ -2,6 +2,7 @@ export type {
   ConnectionStatus,
   Session,
   EndpointAssignment,
+  ConnectionConfigSummary,
   SessionResponse,
   NavigatorConnectionLike,
 } from "./session";
@@ -39,6 +40,15 @@ export type {
 } from "./admin";
 
 export type {
+  OpsAlertSeverity,
+  OpsAlertStatus,
+  OpsAlertSummary,
+  OpsAlertEscalationChannel,
+  OpsAlertEscalationLevel,
+  OpsAlertEscalationRecipient,
+  OpsAlertEscalationPreview,
+  OpsAlertDeliveryStatus,
+  OpsAlertDeliverySummary,
   RouteDecisionOpsTotals,
   RouteDecisionOpsFallbackPressure,
   RouteDecisionOpsDegradationWindows,
@@ -46,6 +56,7 @@ export type {
   RouteDecisionOpsSlaWindows,
   RouteDecisionOpsFailureDomainPressure,
   RouteDecisionOpsFailureDomainRecovery,
+  RouteDecisionOpsInventoryHealth,
   RouteDecisionQualityMetrics,
   RouteDecisionOpsEndpointSummary,
   RouteDecisionOpsNetworkSummary,
@@ -59,4 +70,10 @@ export type {
   RouteReprobeExecutionSummary,
   RouteDecisionOpsSummary,
   RouteDecisionOpsResponse,
+  OpsAlertsResponse,
+  UpdateOpsAlertResponse,
+  OpsAlertEscalationPreviewResponse,
+  OpsAlertDeliveriesResponse,
+  DeliverOpsAlertResponse,
+  DeliverOpsAlertDigestResponse,
 } from "./ops";
