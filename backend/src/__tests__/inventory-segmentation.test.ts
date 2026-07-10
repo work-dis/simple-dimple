@@ -16,6 +16,7 @@ function makeServer(overrides: Partial<ServerOption> & { id: string }): ServerOp
     protocol: "vless",
     transportProfile: "reality-tcp",
     latencyMs: 40,
+    latencyMeasuredAt: null,
     loadPercent: 10,
     ...overrides
   };

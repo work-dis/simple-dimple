@@ -126,6 +126,16 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, authAccount.isAuthenticated, authAccount.isAdmin]);
 
+  useEffect(() => {
+    if (screen !== "server" || !authAccount.isAuthenticated) {
+      return;
+    }
+    void routeSession.refreshServerLatency();
+    // Deliberately keyed on screen + auth boolean only, not routeSession
+    // (unstable object identity every render) — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, authAccount.isAuthenticated]);
+
   async function changeServer(serverId: string) {
     await routeSession.changeServer(serverId);
     setScreen("home");

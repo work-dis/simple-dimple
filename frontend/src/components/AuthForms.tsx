@@ -152,7 +152,7 @@ function PasswordAuthForm({
         type="text"
         value={loginDraft}
         onChange={(e) => onSetLoginDraft(e.target.value)}
-        placeholder="Например demo"
+        placeholder="Введите логин"
         disabled={isLoading || isSubmitting}
       />
       {mode === "register" && (
@@ -183,11 +183,9 @@ function PasswordAuthForm({
         placeholder="Минимум 6 символов"
         disabled={isLoading || isSubmitting}
       />
-      <strong>
-        {mode === "login"
-          ? "Тестовый seed-аккаунт: demo / change-me"
-          : "На этом этапе аккаунт создаётся сразу, без подтверждения email"}
-      </strong>
+      {mode === "register" ? (
+        <strong>На этом этапе аккаунт создаётся сразу, без подтверждения email</strong>
+      ) : null}
       <button
         className="secondaryButton"
         onClick={onSubmit}

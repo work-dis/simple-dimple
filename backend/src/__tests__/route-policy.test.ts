@@ -16,6 +16,7 @@ function createServer(overrides: Partial<ServerOption> & Pick<ServerOption, "id"
     protocol: overrides.protocol ?? "vless",
     transportProfile: overrides.transportProfile ?? "reality",
     latencyMs: overrides.latencyMs ?? 40,
+    latencyMeasuredAt: overrides.latencyMeasuredAt ?? null,
     loadPercent: overrides.loadPercent ?? 30
   };
 }

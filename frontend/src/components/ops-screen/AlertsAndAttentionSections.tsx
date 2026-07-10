@@ -100,12 +100,14 @@ export function AttentionSection({
     <div className="opsSection">
       <h2>Attention now</h2>
       <div className="serverList">
-        <div className="serverButton">
-          <span>Overall severity</span>
-          <small>
-            {formatOperationalSeverity(operationalSummary.overallSeverity)} · active alerts{" "}
-            {operationalSummary.activeAlertCount}
-          </small>
+        <div className={`serverButton alertCard severity-${operationalSummary.overallSeverity}`}>
+          <div className="alertHeader">
+            <span className={`severityBadge ${formatOperationalSeverity(operationalSummary.overallSeverity)}`}>
+              {formatOperationalSeverity(operationalSummary.overallSeverity)}
+            </span>
+            <strong className="alertTitle">Overall severity</strong>
+          </div>
+          <p className="alertDetail">Active alerts · {operationalSummary.activeAlertCount}</p>
           <small>
             inventory {formatInventoryRisk(operationalSummary.inventoryHealth.riskLevel)} · endpoints{" "}
             {operationalSummary.inventoryHealth.activeEndpoints} · providers{" "}
@@ -136,11 +138,14 @@ export function AttentionSection({
         </div>
         {operationalSummary.alerts.length ? (
           operationalSummary.alerts.map((alert) => (
-            <div className="serverButton" key={alert.id}>
-              <span>
-                {formatAlertSeverity(alert.severity)} · {alert.title}
-              </span>
-              <small>{alert.detail}</small>
+            <div className={`serverButton alertCard severity-${alert.severity}`} key={alert.id}>
+              <div className="alertHeader">
+                <span className={`severityBadge ${formatAlertSeverity(alert.severity)}`}>
+                  {formatAlertSeverity(alert.severity)}
+                </span>
+                <strong className="alertTitle">{alert.title}</strong>
+              </div>
+              <p className="alertDetail">{alert.detail}</p>
             </div>
           ))
         ) : (

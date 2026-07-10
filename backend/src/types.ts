@@ -18,6 +18,7 @@ export type ServerOption = {
   protocol: string;
   transportProfile: string;
   latencyMs: number;
+  latencyMeasuredAt: string | null;
   loadPercent: number;
 };
 

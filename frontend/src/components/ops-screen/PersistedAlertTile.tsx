@@ -46,38 +46,54 @@ export function PersistedAlertTile({
     : [];
 
   return (
-    <div className="serverButton">
-      <span>
-        {formatAlertSeverity(alert.severity)} · {formatPersistedAlertStatus(alert.status)} · {alert.title}
-      </span>
-      <small>{alert.detail}</small>
+    <div className={`serverButton alertCard severity-${alert.severity}`}>
+      {/* Info block: severity/status, title, detail, and secondary metadata —
+          nothing clickable lives in here. */}
+      <div className="alertHeader">
+        <span className={`severityBadge ${formatAlertSeverity(alert.severity)}`}>
+          {formatAlertSeverity(alert.severity)}
+        </span>
+        <span className={`alertStatusBadge ${formatPersistedAlertStatus(alert.status)}`}>
+          {formatPersistedAlertStatus(alert.status)}
+        </span>
+        <strong className="alertTitle">{alert.title}</strong>
+      </div>
+      <p className="alertDetail">{alert.detail}</p>
+      {alert.severity === "watch" ? (
+        <p className="alertDetail">Delivery path: shared watch digest batch.</p>
+      ) : null}
+
       {inventoryAlertMetadata ? (
-        <>
+        <div className="alertMeta">
           <small>
-            inventory counts · endpoints {inventoryAlertMetadata.activeInventoryEndpoints ?? "—"} · providers{" "}
+            Inventory · endpoints {inventoryAlertMetadata.activeInventoryEndpoints ?? "—"} · providers{" "}
             {inventoryAlertMetadata.distinctInventoryProviders ?? "—"} · ASN{" "}
             {inventoryAlertMetadata.distinctInventoryAsns ?? "—"} · regions{" "}
             {inventoryAlertMetadata.distinctInventoryRegions ?? "—"}
           </small>
           <small>
-            policy target {inventoryAlertMetadata.minimumRecommendedFailureDomains ?? "—"} ·{" "}
+            Policy target {inventoryAlertMetadata.minimumRecommendedFailureDomains ?? "—"} ·{" "}
             {inventoryAlertMetadata.inventoryFailedDimensions.length
               ? inventoryAlertMetadata.inventoryFailedDimensions.join(" · ")
               : "Policy satisfied"}
           </small>
-        </>
+        </div>
       ) : null}
-      <small>
-        started {formatDateTime(alert.startedAt)} · last detected {formatDateTime(alert.lastDetectedAt)}
-      </small>
-      <small>
-        acknowledged {formatDateTime(alert.acknowledgedAt)} · snoozed until {formatDateTime(alert.snoozedUntil)}
-      </small>
-      <small>
-        dedupe {alert.dedupeKey}
-      </small>
-      {alert.severity === "watch" ? <small>delivery path · shared watch digest batch</small> : null}
-      <div className="opsActionRow">
+
+      <div className="alertMeta">
+        <small>
+          Started {formatDateTime(alert.startedAt)} · last detected {formatDateTime(alert.lastDetectedAt)}
+        </small>
+        <small>
+          Acknowledged {formatDateTime(alert.acknowledgedAt)} · snoozed until {formatDateTime(alert.snoozedUntil)}
+        </small>
+        <small>Dedupe key · {alert.dedupeKey}</small>
+      </div>
+
+      {/* Actions block: every button that mutates this alert's state, grouped
+          apart from the info above by a divider so nothing reads as "loose". */}
+      <div className="alertActions">
+        <span className="alertActionsLabel">Investigate</span>
         <button
           className="ghostButton"
           disabled={isSubmitting}
@@ -92,9 +108,12 @@ export function PersistedAlertTile({
         >
           Delivery log
         </button>
+      </div>
+      <div className="alertActions">
+        <span className="alertActionsLabel">Manage</span>
         {alert.severity === "critical" ? (
           <button
-            className="ghostButton"
+            className="ghostButton primaryGhostButton"
             disabled={isSubmitting}
             onClick={() => void onDeliverAlert(alert.id)}
           >
@@ -129,59 +148,64 @@ export function PersistedAlertTile({
           </button>
         ) : null}
       </div>
+
       {escalationPreview ? (
-        <>
+        <div className="alertSubPanel">
+          <h4>Escalation preview</h4>
           <small>
-            escalation {escalationPreview.escalationLevel} · {escalationPreview.shouldEscalate ? "send" : "hold"} ·{" "}
+            Escalation {escalationPreview.escalationLevel} · {escalationPreview.shouldEscalate ? "send" : "hold"} ·{" "}
             recipients {escalationPreview.recipients.length}
           </small>
-          <small>preview subject · {escalationPreview.recommendedSubject}</small>
-          <small>preview reason · {escalationPreview.reason}</small>
+          <small>Subject · {escalationPreview.recommendedSubject}</small>
+          <small>Reason · {escalationPreview.reason}</small>
           {escalationMessageLines.map((line, index) => (
             <small key={`${alert.id}-preview-line-${index}`}>
-              {index === 0 ? "preview title" : line.startsWith("Status:")
-                ? "preview status"
+              {index === 0 ? "Title" : line.startsWith("Status:")
+                ? "Status"
                 : line.startsWith("Severity:")
-                  ? "preview severity"
+                  ? "Severity"
                   : line.startsWith("Last detected:")
-                    ? "preview last detected"
+                    ? "Last detected"
                     : line.startsWith("Escalation:")
-                      ? "preview escalation"
+                      ? "Escalation"
                       : line.startsWith("Why:")
-                        ? "preview why"
+                        ? "Why"
                         : line.startsWith("Failed dimensions:")
-                          ? "preview failed dimensions"
+                          ? "Failed dimensions"
                           : line.startsWith("Inventory counts:")
-                            ? "preview inventory counts"
+                            ? "Inventory counts"
                             : line.startsWith("Policy target:")
-                              ? "preview policy target"
+                              ? "Policy target"
                               : index === 1
-                                ? "preview detail"
-                                : "preview body"}{" "}
+                                ? "Detail"
+                                : "Body"}{" "}
               · {line}
             </small>
           ))}
           {escalationPreview.recipients.map((recipient) => (
             <small key={`${alert.id}-${recipient.userId}-${recipient.channel}`}>
-              step {recipient.chainStep} · {recipient.escalationTier} · {recipient.channel} · {recipient.displayName} · {recipient.contact}
+              Step {recipient.chainStep} · {recipient.escalationTier} · {recipient.channel} · {recipient.displayName} ·{" "}
+              {recipient.contact}
             </small>
           ))}
-        </>
+        </div>
       ) : null}
+
       {deliveries.length ? (
-        <>
+        <div className="alertSubPanel">
+          <h4>Delivery log</h4>
           <small>
-            recent delivery batch {deliveries[0]?.batchId.slice(0, 8)} · entries {deliveries.length}
+            Recent delivery batch {deliveries[0]?.batchId.slice(0, 8)} · entries {deliveries.length}
           </small>
           {deliveries.map((delivery) => (
-            <div key={delivery.id}>
+            <div className="alertDeliveryEntry" key={delivery.id}>
               <small>
                 {delivery.status} · {delivery.channel} · {delivery.deliveryPath} · {delivery.recipientDisplayName} ·{" "}
                 {delivery.recipientContact} · {formatDateTime(delivery.deliveredAt ?? delivery.createdAt)}
               </small>
-              {delivery.providerMessageId ? <small>provider message · {delivery.providerMessageId}</small> : null}
+              {delivery.providerMessageId ? <small>Provider message · {delivery.providerMessageId}</small> : null}
               {typeof delivery.metadata.failureReason === "string" ? (
-                <small>failure reason · {delivery.metadata.failureReason}</small>
+                <small>Failure reason · {delivery.metadata.failureReason}</small>
               ) : null}
               {delivery.status === "delivered" ? (
                 <div className="opsActionRow">
@@ -207,7 +231,7 @@ export function PersistedAlertTile({
               ) : null}
             </div>
           ))}
-        </>
+        </div>
       ) : null}
     </div>
   );

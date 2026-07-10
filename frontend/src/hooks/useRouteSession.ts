@@ -5,6 +5,7 @@ import {
   connectNativeTunnel,
   connectWithFallback,
   disconnectNativeTunnel,
+  getNativeTunnelStatus,
   getStoredAuthSessionId,
   isNativeTunnelAvailable,
   readJson,
@@ -102,11 +103,32 @@ export function useRouteSession({
       return;
     }
 
-    const result =
-      status === "connected" && config ? await connectNativeTunnel(config) : await disconnectNativeTunnel();
+    if (status === "connected" && config) {
+      const result = await connectNativeTunnel(config);
+      if (!result.ok) {
+        onError(`Native VPN tunnel: ${result.error}`);
+      }
+      return;
+    }
+
+    // disconnect() resolving "ok" isn't proof the OS tunnel actually went
+    // down — a known teardown race (Decision 035/036, DECISIONS.md) can leave
+    // it running while this call still reports success, which is exactly what
+    // left the system status-bar VPN icon on after the app already showed
+    // "disconnected". Confirm against the plugin's own status() and retry
+    // once before giving up.
+    let result = await disconnectNativeTunnel();
+    let nativeStatus = await getNativeTunnelStatus();
+
+    if (nativeStatus === "connected") {
+      result = await disconnectNativeTunnel();
+      nativeStatus = await getNativeTunnelStatus();
+    }
 
     if (!result.ok) {
       onError(`Native VPN tunnel: ${result.error}`);
+    } else if (nativeStatus === "connected") {
+      onError("VPN-туннель на устройстве не отключился — нажмите «Отключить» ещё раз");
     }
   }
 
@@ -256,6 +278,29 @@ export function useRouteSession({
     }
   }
 
+  // Фоновый health-check воркер обновляет Endpoint.latencyMs не чаще раза в
+  // интервал (сейчас 15с, отдельный процесс, не гарантированно запущенный
+  // рядом с backend'ом) — экран "Сервер" вызывает это при открытии, чтобы не
+  // показывать число многоминутной (или вообще ни разу не измеренной)
+  // давности как будто live-пинг.
+  async function refreshServerLatency() {
+    try {
+      const sessionQuery = new URLSearchParams(
+        buildRouteContext() as unknown as Record<string, string>,
+      );
+      const data = await readJson<SessionResponse>(
+        `/api/session/refresh-latency?${sessionQuery.toString()}`,
+        { method: "POST" },
+      );
+
+      setServers(data.servers ?? []);
+      setRoutePolicy(data.routePolicy);
+    } catch {
+      // Best-effort: экран уже показывает честное "нет данных" по умолчанию,
+      // молчаливый провал обновления не хуже, чем отсутствие сети вообще.
+    }
+  }
+
   const activeServer = servers.find((server) => server.id === session?.activeServerId);
 
   return {
@@ -272,5 +317,6 @@ export function useRouteSession({
     resetSession,
     toggleConnection,
     changeServer,
+    refreshServerLatency,
   };
 }

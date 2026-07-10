@@ -56,3 +56,20 @@ export async function disconnectNativeTunnel(): Promise<{ ok: true } | { ok: fal
     return { ok: false, error: error instanceof Error ? error.message : "Unknown native tunnel error" };
   }
 }
+
+// disconnect() resolving isn't proof the OS tore the tunnel down — a teardown
+// race (see Decision 035/036, DECISIONS.md) can leave the native side still
+// "connected" while the JS call reports success. Ask the plugin directly
+// instead of trusting the disconnect() resolution alone.
+export async function getNativeTunnelStatus(): Promise<VpnTunnelStatus | null> {
+  if (!isNativeTunnelAvailable()) {
+    return null;
+  }
+
+  try {
+    const result = await vpnTunnel.status();
+    return result.status;
+  } catch {
+    return null;
+  }
+}

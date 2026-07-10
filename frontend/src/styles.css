@@ -357,6 +357,160 @@ input {
   margin-top: 12px;
 }
 
+/* Alert card: severity is shown by a left accent bar + badge, status by a
+   separate badge, and the button rows are visually split from the info
+   above them with a divider so info and actions never blur together. */
+.alertCard {
+  border-left: 4px solid rgba(15, 23, 42, 0.2);
+}
+
+.alertCard.severity-critical {
+  border-left-color: #b91c1c;
+}
+
+.alertCard.severity-watch {
+  border-left-color: #b45309;
+}
+
+.alertCard.severity-ok {
+  border-left-color: #15803d;
+}
+
+.severityBadge.ok {
+  background: rgba(22, 163, 74, 0.15);
+  color: #166534;
+}
+
+.alertHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.alertTitle {
+  margin: 0;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.severityBadge,
+.alertStatusBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.severityBadge.critical {
+  background: rgba(220, 38, 38, 0.14);
+  color: #991b1b;
+}
+
+.severityBadge.watch {
+  background: rgba(217, 119, 6, 0.16);
+  color: #92400e;
+}
+
+.alertStatusBadge.active {
+  background: rgba(15, 23, 42, 0.1);
+  color: #0f172a;
+}
+
+.alertStatusBadge.acknowledged {
+  background: rgba(37, 99, 235, 0.12);
+  color: #1d4ed8;
+}
+
+.alertStatusBadge.snoozed {
+  background: rgba(124, 58, 237, 0.12);
+  color: #6d28d9;
+}
+
+.alertStatusBadge.resolved {
+  background: rgba(22, 163, 74, 0.15);
+  color: #166534;
+}
+
+.alertDetail {
+  margin: 4px 0 0;
+  color: rgba(15, 23, 42, 0.85);
+}
+
+.alertMeta {
+  display: grid;
+  gap: 3px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.alertMeta small {
+  color: rgba(15, 23, 42, 0.55);
+  font-size: 0.78rem;
+}
+
+.alertActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(15, 23, 42, 0.1);
+}
+
+.alertActionsLabel {
+  flex-basis: 100%;
+  margin: 0 0 2px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(15, 23, 42, 0.45);
+}
+
+.primaryGhostButton {
+  border-color: rgba(220, 38, 38, 0.4);
+  background: rgba(220, 38, 38, 0.08);
+  color: #b91c1c;
+}
+
+.alertSubPanel {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.045);
+}
+
+.alertSubPanel h4 {
+  margin: 0 0 2px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(15, 23, 42, 0.5);
+}
+
+.alertDeliveryEntry {
+  display: grid;
+  gap: 2px;
+  padding: 8px 0;
+  border-top: 1px solid rgba(15, 23, 42, 0.06);
+}
+
+.alertDeliveryEntry:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
 .error {
   margin: 16px 0 0;
   color: #b91c1c;

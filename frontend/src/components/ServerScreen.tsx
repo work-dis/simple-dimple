@@ -19,12 +19,19 @@ export function ServerScreen({
   // (routePolicy), а не просто минимальный latencyMs "по бумаге".
   const fastestId =
     routePolicy?.recommendedEndpointId ??
-    [...servers].sort((a, b) => a.latencyMs - b.latencyMs)[0]?.id ??
+    [...servers]
+      .filter((server) => server.latencyMeasuredAt)
+      .sort((a, b) => a.latencyMs - b.latencyMs)[0]?.id ??
     null;
 
   const sortedServers = [...servers].sort((a, b) => {
     if (a.id === fastestId) return -1;
     if (b.id === fastestId) return 1;
+    // Непроверенные (никогда не пинговавшиеся) серверы не должны обгонять
+    // реально измеренные по случайному старому значению latencyMs.
+    if (!a.latencyMeasuredAt && !b.latencyMeasuredAt) return 0;
+    if (!a.latencyMeasuredAt) return 1;
+    if (!b.latencyMeasuredAt) return -1;
     return a.latencyMs - b.latencyMs;
   });
 
@@ -55,7 +62,7 @@ export function ServerScreen({
               ) : null}
             </span>
             <small>
-              {server.region} · {server.latencyMs} мс
+              {server.region} · {server.latencyMeasuredAt ? `${server.latencyMs} мс` : "нет данных о пинге"}
             </small>
           </button>
         ))}

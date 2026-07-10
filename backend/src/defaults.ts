@@ -44,6 +44,7 @@ export const defaultEndpoints: ServerOption[] = [
     protocol: "vless",
     transportProfile: "reality-tcp",
     latencyMs: 46,
+    latencyMeasuredAt: null,
     loadPercent: 34
   },
   {
@@ -58,6 +59,7 @@ export const defaultEndpoints: ServerOption[] = [
     protocol: "trojan",
     transportProfile: "tls-tcp",
     latencyMs: 39,
+    latencyMeasuredAt: null,
     loadPercent: 51
   },
   {
@@ -72,6 +74,7 @@ export const defaultEndpoints: ServerOption[] = [
     protocol: "shadowsocks-2022",
     transportProfile: "tcp-emergency",
     latencyMs: 28,
+    latencyMeasuredAt: null,
     loadPercent: 43
   }
 ];

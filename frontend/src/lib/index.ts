@@ -1,6 +1,6 @@
 export { HttpError, getStoredAuthSessionId, readJson, resolveApiUrl, setStoredAuthSessionId } from "./http";
 export { buildRouteContext, readNetworkType, submitProbeReport } from "./network";
-export { isNativeTunnelAvailable, connectNativeTunnel, disconnectNativeTunnel } from "./vpnTunnel";
+export { isNativeTunnelAvailable, connectNativeTunnel, disconnectNativeTunnel, getNativeTunnelStatus } from "./vpnTunnel";
 export type { VpnTunnelPlugin, VpnTunnelStatus } from "./vpnTunnel";
 export { connectWithFallback } from "./connectFallback";
 export { enqueueTelemetryReport, flushTelemetryQueue } from "./telemetryQueue";

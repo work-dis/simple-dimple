@@ -188,6 +188,8 @@ export function mapEndpointRowToServerOption(endpointRow: {
   transportProfile: string;
   protocol: string;
   latencyMs: number;
+  lastHealthCheckAt: Date | null;
+  lastHealthCheckOk: boolean | null;
   loadPercent: number;
   serverPool: {
     code: string;
@@ -206,6 +208,17 @@ export function mapEndpointRowToServerOption(endpointRow: {
     protocol: endpointRow.protocol,
     transportProfile: endpointRow.transportProfile,
     latencyMs: endpointRow.latencyMs,
+    // Только эндпоинты с зарегистрированным transportConfig реально
+    // перепроверяются health-check'ом (listCheckableEndpoints,
+    // endpoint-healthcheck.ts) — latencyMs остальных застывает на seed-
+    // значении навсегда. lastHealthCheckOk обязателен: failed-проверка тоже
+    // штампует lastHealthCheckAt "только что", но latencyMs при этом не
+    // обновляется — без этой проверки свежий таймстамп встал бы рядом со
+    // старым числом как будто оно только что подтверждено.
+    latencyMeasuredAt:
+      endpointRow.lastHealthCheckAt && endpointRow.lastHealthCheckOk
+        ? endpointRow.lastHealthCheckAt.toISOString()
+        : null,
     loadPercent: endpointRow.loadPercent
   };
 }
