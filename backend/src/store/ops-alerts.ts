@@ -1,322 +1,23 @@
 import { randomUUID } from "node:crypto";
 
-import type { Prisma, PrismaClient, OpsAlert, OpsAlertDelivery } from "../generated/prisma/client.js";
+import type { PrismaClient, OpsAlertDelivery } from "../generated/prisma/client.js";
 import { ContactType, OpsAlertStatus, UserStatus } from "../generated/prisma/client.js";
 import type {
   DeliverOpsAlertDigestResponse,
   DeliverOpsAlertResponse,
   OpsAlertDeliveriesResponse,
-  OpsAlertDeliverySummary,
   OpsAlertEscalationPreview,
-  OpsAlertEscalationRecipient,
   OpsAlertListOptions,
-  OpsAlertSummary,
   RouteDecisionOpsSummary,
 } from "../types.js";
 import { detectOpsAlertsFromSummary } from "./ops-alert-detector.js";
 import type { OpsAlertDeliveryTransport } from "./ops-alert-delivery.js";
+import { asJson, mapDeliveryChannel, mapOpsAlert, mapOpsAlertDelivery, toReplayMetadata } from "./ops-alert-mappers.js";
+import { buildDigestMessage, buildDigestSubject } from "./ops-alert-messages.js";
+import { buildOpsAlertEscalationPreview } from "./ops-alert-escalation.js";
+import { formatCooldownWindow, formatUtcHour, isHourInsideWindow, parseUtcHour } from "./ops-alert-time-window.js";
 
-function asJson(value: unknown): Prisma.InputJsonValue {
-  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function mapOpsAlert(alert: OpsAlert): OpsAlertSummary {
-  return {
-    id: alert.id,
-    alertType: alert.alertType,
-    severity: alert.severity,
-    status: alert.status,
-    dedupeKey: alert.dedupeKey,
-    title: alert.title,
-    detail: alert.detail,
-    metadata: isRecord(alert.metadata) ? alert.metadata : {},
-    startedAt: alert.startedAt.toISOString(),
-    lastDetectedAt: alert.lastDetectedAt.toISOString(),
-    acknowledgedAt: alert.acknowledgedAt?.toISOString() ?? null,
-    resolvedAt: alert.resolvedAt?.toISOString() ?? null,
-    snoozedUntil: alert.snoozedUntil?.toISOString() ?? null,
-    createdAt: alert.createdAt.toISOString(),
-    updatedAt: alert.updatedAt.toISOString()
-  };
-}
-
-function mapOpsAlertDelivery(delivery: OpsAlertDelivery): OpsAlertDeliverySummary {
-  return {
-    id: delivery.id,
-    alertId: delivery.opsAlertId,
-    batchId: delivery.batchId,
-    channel: delivery.channel,
-    escalationLevel:
-      delivery.escalationLevel === "immediate" || delivery.escalationLevel === "digest"
-        ? delivery.escalationLevel
-        : "none",
-    status: delivery.status,
-    recipientUserId: delivery.recipientUserId ?? null,
-    recipientDisplayName: delivery.recipientDisplayName,
-    recipientContact: delivery.recipientContact,
-    subject: delivery.subject,
-    message: delivery.message,
-    reason: delivery.reason,
-    deliveryPath: delivery.deliveryPath,
-    providerMessageId: delivery.providerMessageId ?? null,
-    actorUserId: delivery.actorUserId ?? null,
-    deliveredAt: delivery.deliveredAt?.toISOString() ?? null,
-    metadata: isRecord(delivery.metadata) ? delivery.metadata : {},
-    createdAt: delivery.createdAt.toISOString(),
-    updatedAt: delivery.updatedAt.toISOString()
-  };
-}
-
-function mapDeliveryChannel(channel: ContactType): "telegram" | "email" {
-  return channel === ContactType.telegram ? "telegram" : "email";
-}
-
-function toReplayMetadata(
-  originalMetadata: unknown,
-  input: {
-    replayType: "retry" | "resend";
-    sourceDeliveryId: string;
-    sourceBatchId: string;
-    replayBatchId: string;
-    replayActorUserId?: string | null;
-    replayGroupSize?: number;
-    failureReason?: string;
-    transport?: Record<string, unknown>;
-  }
-) {
-  const metadata = isRecord(originalMetadata) ? { ...originalMetadata } : {};
-
-  delete metadata.failureReason;
-  delete metadata.transport;
-
-  const previousReplayCount = typeof metadata.replayCount === "number" ? metadata.replayCount : 0;
-  const previousRetryCount = typeof metadata.retryCount === "number" ? metadata.retryCount : 0;
-  const previousResendCount = typeof metadata.resendCount === "number" ? metadata.resendCount : 0;
-
-  return {
-    ...metadata,
-    replayType: input.replayType,
-    replayOfDeliveryId: input.sourceDeliveryId,
-    replayOfBatchId: input.sourceBatchId,
-    replayBatchId: input.replayBatchId,
-    replayCount: previousReplayCount + 1,
-    replayTriggeredAt: new Date().toISOString(),
-    replayActorUserId: input.replayActorUserId ?? null,
-    ...(typeof input.replayGroupSize === "number" ? { replayGroupSize: input.replayGroupSize } : {}),
-    ...(input.replayType === "retry"
-      ? {
-          retryOfDeliveryId: input.sourceDeliveryId,
-          retryOfBatchId: input.sourceBatchId,
-          retryBatchId: input.replayBatchId,
-          retryCount: previousRetryCount + 1,
-          retryTriggeredAt: new Date().toISOString(),
-          retryActorUserId: input.replayActorUserId ?? null,
-          ...(typeof input.replayGroupSize === "number" ? { retryGroupSize: input.replayGroupSize } : {})
-        }
-      : {
-          resendOfDeliveryId: input.sourceDeliveryId,
-          resendOfBatchId: input.sourceBatchId,
-          resendBatchId: input.replayBatchId,
-          resendCount: previousResendCount + 1,
-          resendTriggeredAt: new Date().toISOString(),
-          resendActorUserId: input.replayActorUserId ?? null,
-          ...(typeof input.replayGroupSize === "number" ? { resendGroupSize: input.replayGroupSize } : {})
-        }),
-    ...(input.failureReason ? { failureReason: input.failureReason } : {}),
-    ...(input.transport ? { transport: input.transport } : {})
-  };
-}
-
-type EscalationAdminRecipientSource = {
-  id: string;
-  displayName: string;
-  contact: string;
-  contactType: "telegram" | "email";
-  opsAlertImmediateEnabled: boolean;
-  opsAlertDigestEnabled: boolean;
-  opsAlertEscalationTier: "primary" | "secondary";
-};
-
-type EscalationPreviewInput = {
-  alert: Pick<OpsAlertSummary, "id" | "status" | "severity" | "title" | "detail" | "lastDetectedAt" | "metadata">;
-  recipients: EscalationAdminRecipientSource[];
-  now?: Date;
-};
-
-function readInventoryAlertMetadata(metadata: Record<string, unknown>) {
-  const inventoryFailedDimensions = Array.isArray(metadata.inventoryFailedDimensions)
-    ? metadata.inventoryFailedDimensions.filter((value): value is string => typeof value === "string")
-    : [];
-  const inventoryPolicyViolationMessage =
-    typeof metadata.inventoryPolicyViolationMessage === "string" ? metadata.inventoryPolicyViolationMessage : null;
-  const activeInventoryEndpoints =
-    typeof metadata.activeInventoryEndpoints === "number" ? metadata.activeInventoryEndpoints : null;
-  const distinctInventoryProviders =
-    typeof metadata.distinctInventoryProviders === "number" ? metadata.distinctInventoryProviders : null;
-  const distinctInventoryAsns =
-    typeof metadata.distinctInventoryAsns === "number" ? metadata.distinctInventoryAsns : null;
-  const distinctInventoryRegions =
-    typeof metadata.distinctInventoryRegions === "number" ? metadata.distinctInventoryRegions : null;
-  const minimumRecommendedFailureDomains =
-    typeof metadata.minimumRecommendedFailureDomains === "number" ? metadata.minimumRecommendedFailureDomains : null;
-
-  if (
-    inventoryFailedDimensions.length === 0 &&
-    inventoryPolicyViolationMessage === null &&
-    activeInventoryEndpoints === null &&
-    distinctInventoryProviders === null &&
-    distinctInventoryAsns === null &&
-    distinctInventoryRegions === null &&
-    minimumRecommendedFailureDomains === null
-  ) {
-    return null;
-  }
-
-  return {
-    inventoryFailedDimensions,
-    inventoryPolicyViolationMessage,
-    activeInventoryEndpoints,
-    distinctInventoryProviders,
-    distinctInventoryAsns,
-    distinctInventoryRegions,
-    minimumRecommendedFailureDomains
-  };
-}
-
-function buildOpsAlertInventoryContext(metadata: Record<string, unknown>) {
-  const inventoryAlertMetadata = readInventoryAlertMetadata(metadata);
-
-  if (!inventoryAlertMetadata) {
-    return null;
-  }
-
-  return [
-    inventoryAlertMetadata.inventoryPolicyViolationMessage,
-    inventoryAlertMetadata.inventoryFailedDimensions.length > 0
-      ? `Failed dimensions: ${inventoryAlertMetadata.inventoryFailedDimensions.join(", ")}`
-      : null,
-    inventoryAlertMetadata.activeInventoryEndpoints !== null ||
-    inventoryAlertMetadata.distinctInventoryProviders !== null ||
-    inventoryAlertMetadata.distinctInventoryAsns !== null ||
-    inventoryAlertMetadata.distinctInventoryRegions !== null
-      ? `Inventory counts: endpoints ${inventoryAlertMetadata.activeInventoryEndpoints ?? "—"}, providers ${inventoryAlertMetadata.distinctInventoryProviders ?? "—"}, ASNs ${inventoryAlertMetadata.distinctInventoryAsns ?? "—"}, regions ${inventoryAlertMetadata.distinctInventoryRegions ?? "—"}`
-      : null,
-    inventoryAlertMetadata.minimumRecommendedFailureDomains !== null
-      ? `Policy target: ${inventoryAlertMetadata.minimumRecommendedFailureDomains} independent failure domains`
-      : null
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join("\n");
-}
-
-function buildAlertMessageBody(alert: Pick<OpsAlertSummary, "detail" | "metadata" | "status" | "severity" | "lastDetectedAt">) {
-  const inventoryContext = buildOpsAlertInventoryContext(alert.metadata);
-
-  return (
-    `${alert.detail.trim()}\n\n` +
-    `${inventoryContext ? `${inventoryContext}\n\n` : ""}` +
-    `Status: ${alert.status}\n` +
-    `Severity: ${alert.severity}\n` +
-    `Last detected: ${alert.lastDetectedAt}`
-  );
-}
-
-function buildDigestSubject(alertCount: number) {
-  return `[digest/watch] ${alertCount} ops alerts need follow-up`;
-}
-
-function buildDigestMessage(alerts: OpsAlertSummary[]) {
-  return [
-    "Watch-level ops digest",
-    "",
-    `Included alerts: ${alerts.length}`,
-    ...alerts.flatMap((alert, index) => ["", `${index + 1}. ${alert.title}`, buildAlertMessageBody(alert)])
-  ].join("\n");
-}
-
-export function buildOpsAlertEscalationPreview(input: EscalationPreviewInput): OpsAlertEscalationPreview {
-  const generatedAt = (input.now ?? new Date()).toISOString();
-  const alertTitle = input.alert.title.trim();
-
-  let escalationLevel: OpsAlertEscalationPreview["escalationLevel"] = "none";
-  let shouldEscalate = false;
-  let reason = "Alert does not currently require external escalation.";
-
-  if (input.alert.status === "resolved") {
-    reason = "Alert is already resolved, so external escalation is not needed.";
-  } else if (input.alert.status === "snoozed") {
-    reason = "Alert is snoozed, so escalation should stay paused until the snooze window ends.";
-  } else if (input.alert.status === "acknowledged") {
-    reason = "Alert is already acknowledged, so escalation can stay inside the current triage flow.";
-  } else if (input.alert.severity === "critical") {
-    escalationLevel = "immediate";
-    shouldEscalate = true;
-    reason = "Critical active alert should be delivered immediately to every active admin contact.";
-  } else {
-    escalationLevel = "digest";
-    shouldEscalate = true;
-    reason = "Watch-level active alert can be included in the next lightweight admin digest or check-in.";
-  }
-
-  const eligibleRecipients = shouldEscalate
-    ? input.recipients
-        .filter((recipient) =>
-          escalationLevel === "immediate" ? recipient.opsAlertImmediateEnabled : recipient.opsAlertDigestEnabled
-        )
-        .sort((left, right) => {
-          if (left.opsAlertEscalationTier === right.opsAlertEscalationTier) {
-            return left.displayName.localeCompare(right.displayName);
-          }
-
-          return left.opsAlertEscalationTier === "primary" ? -1 : 1;
-        })
-    : [];
-  const recipients: OpsAlertEscalationRecipient[] = eligibleRecipients.map((recipient) => ({
-    userId: recipient.id,
-    displayName: recipient.displayName,
-    contact: recipient.contact,
-    channel: recipient.contactType,
-    escalationTier: recipient.opsAlertEscalationTier,
-    chainStep: recipient.opsAlertEscalationTier === "primary" ? 1 : 2,
-    reason:
-      escalationLevel === "immediate"
-        ? recipient.opsAlertEscalationTier === "primary"
-          ? "Primary admin contact for immediate triage of critical alert."
-          : "Secondary escalation step if the primary immediate path fails or is unavailable."
-        : recipient.opsAlertEscalationTier === "primary"
-          ? "Primary digest recipient for watch-level follow-up."
-          : "Secondary digest recipient if the primary digest tier is unavailable."
-  }));
-
-  const recommendedSubject =
-    escalationLevel === "immediate"
-      ? `[critical] ${alertTitle}`
-      : escalationLevel === "digest"
-        ? `[watch] ${alertTitle}`
-        : `[info] ${alertTitle}`;
-  const recommendedMessage =
-    `${alertTitle}\n\n` +
-    `${buildAlertMessageBody(input.alert)}\n` +
-    `Escalation: ${escalationLevel}\n` +
-    `Why: ${reason}`;
-
-  return {
-    alertId: input.alert.id,
-    alertStatus: input.alert.status,
-    alertSeverity: input.alert.severity,
-    escalationLevel,
-    shouldEscalate,
-    reason,
-    recipients,
-    recommendedSubject,
-    recommendedMessage,
-    generatedAt
-  };
-}
+export { buildOpsAlertEscalationPreview } from "./ops-alert-escalation.js";
 
 type RouteDecisionOpsSummaryLoader = (input?: {
   windowHours?: number;
@@ -328,37 +29,6 @@ type CooldownPolicyInput = {
   alertIds: string[];
   preview: OpsAlertEscalationPreview;
 };
-
-function formatCooldownWindow(durationMs: number) {
-  const minutes = Math.round(durationMs / 60_000);
-  if (minutes < 60) {
-    return `${minutes} minute cooldown`;
-  }
-
-  const hours = Math.round((minutes / 60) * 10) / 10;
-  return `${hours} hour cooldown`;
-}
-
-function parseUtcHour(value: number | undefined, fallback: number) {
-  const safeValue = Number.isFinite(value) ? Math.trunc(value as number) : fallback;
-  return Math.min(Math.max(safeValue, 0), 23);
-}
-
-function formatUtcHour(hour: number) {
-  return `${hour.toString().padStart(2, "0")}:00 UTC`;
-}
-
-function isHourInsideWindow(hour: number, startHourUtc: number, endHourUtc: number) {
-  if (startHourUtc === endHourUtc) {
-    return true;
-  }
-
-  if (startHourUtc < endHourUtc) {
-    return hour >= startHourUtc && hour < endHourUtc;
-  }
-
-  return hour >= startHourUtc || hour < endHourUtc;
-}
 
 export function createOpsAlertStore(
   prisma: PrismaClient,
@@ -580,7 +250,7 @@ export function createOpsAlertStore(
     return listDeliveriesInternal(alertId, 20);
   }
 
-  function groupRecipientsByChainStep(recipients: OpsAlertEscalationRecipient[]) {
+  function groupRecipientsByChainStep(recipients: OpsAlertEscalationPreview["recipients"]) {
     const primary = recipients.filter((recipient) => recipient.chainStep === 1);
     const secondary = recipients.filter((recipient) => recipient.chainStep === 2);
     return [primary, secondary].filter((group) => group.length > 0);
@@ -777,7 +447,13 @@ export function createOpsAlertStore(
     return deliveries.map(mapOpsAlertDelivery);
   }
 
-  return {
+  // "const store" + явный "return store" вместо "return { ... }" — некоторые
+  // методы (list, resendDelivery) вызывают другие методы через this;
+  // state-store.ts (Decision 017) торвёт методы с объекта поодиночке
+  // (`listOpsAlerts: opsAlerts.list`), из-за чего при вызове this внутри
+  // становится ссылкой на state-store, а не на этот объект. Именованная
+  // self-ссылка это чинит без .bind() на каждый метод в state-store.ts.
+  const store = {
     async refreshFromOpsSummary(input?: {
       windowHours?: number;
       recentLimit?: number;
@@ -889,7 +565,7 @@ export function createOpsAlertStore(
 
     async list(input?: OpsAlertListOptions) {
       if (input?.refresh !== false) {
-        await this.refreshFromOpsSummary({
+        await store.refreshFromOpsSummary({
           windowHours: input?.windowHours,
           recentLimit: input?.recentLimit,
           summaryLimit: input?.summaryLimit
@@ -991,7 +667,7 @@ export function createOpsAlertStore(
       actorUserId?: string | null
     ): Promise<DeliverOpsAlertResponse> {
       const alert = await loadAlertOrThrow(alertId);
-      const preview = await this.getEscalationPreview(alertId);
+      const preview = await store.getEscalationPreview(alertId);
 
       if (!preview.shouldEscalate || preview.recipients.length === 0 || preview.escalationLevel === "none") {
         throw new Error("Ops alert does not currently require escalation delivery");
@@ -1202,4 +878,6 @@ export function createOpsAlertStore(
       return replayDelivery(alertId, deliveryId, actorUserId, "resend");
     }
   };
+
+  return store;
 }

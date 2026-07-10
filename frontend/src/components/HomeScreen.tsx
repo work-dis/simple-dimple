@@ -1,10 +1,9 @@
-import type { Session, ServerOption, RoutePolicy, Screen } from "../types";
-import { formatAssignmentReason } from "../lib/formatters";
+import type { Session, ServerOption, EndpointAssignment, Screen } from "../types";
 
 interface Props {
   session: Session | null;
   activeServer: ServerOption | undefined;
-  routePolicy: RoutePolicy | null;
+  currentAssignment: EndpointAssignment | null;
   authIsAuthenticated: boolean;
   isAdmin: boolean;
   isLoading: boolean;
@@ -16,7 +15,7 @@ interface Props {
 export function HomeScreen({
   session,
   activeServer,
-  routePolicy,
+  currentAssignment,
   authIsAuthenticated,
   isAdmin,
   isLoading,
@@ -25,6 +24,11 @@ export function HomeScreen({
   onNavigate,
 }: Props) {
   const isConnected = session?.status === "connected";
+  // Тихая метка "· авто" — только когда сервер подобрала система, а не сам
+  // пользователь руками на экране Server.
+  const isManualPick =
+    currentAssignment?.assignmentReason === "manual_select" ||
+    currentAssignment?.assignmentReason === "manual_override";
 
   return (
     <>
@@ -50,6 +54,7 @@ export function HomeScreen({
           disabled={isLoading || isSubmitting}
         >
           Сервер: {activeServer ? activeServer.label : "Не выбран"}
+          {activeServer && !isManualPick ? " · авто" : ""}
         </button>
       </div>
 
@@ -57,9 +62,6 @@ export function HomeScreen({
         {activeServer ? activeServer.region : "—"}
         {" · "}
         {session ? new Date(session.updatedAt).toLocaleString("ru-RU") : "—"}
-        {routePolicy?.recommendedReason
-          ? ` · ${formatAssignmentReason(routePolicy.recommendedReason)}`
-          : ""}
       </p>
 
       <div className="utilityNav" aria-label="Дополнительные разделы">
@@ -79,13 +81,15 @@ export function HomeScreen({
             Admin
           </button>
         ) : null}
-        <button
-          className="utilityButton"
-          onClick={() => onNavigate("ops")}
-          disabled={isLoading || isSubmitting || !authIsAuthenticated || !isAdmin}
-        >
-          Ops
-        </button>
+        {isAdmin ? (
+          <button
+            className="utilityButton"
+            onClick={() => onNavigate("ops")}
+            disabled={isLoading || isSubmitting || !authIsAuthenticated}
+          >
+            Ops
+          </button>
+        ) : null}
         <button
           className="utilityButton"
           onClick={() => onNavigate("account")}

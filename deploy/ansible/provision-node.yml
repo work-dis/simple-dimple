@@ -1,0 +1,16 @@
+---
+# Ansible equivalent of `deploy/xray/provision-node.sh register`, run against
+# one or more hosts from an inventory instead of by hand over SSH per VPS.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini provision-node.yml
+#   ansible-playbook -i inventory.ini provision-node.yml --limit contabo-fr-1
+#
+# See group_vars/xray_nodes.yml (or host_vars/<host>.yml) for the per-node
+# variables this expects (xray_label, xray_provider, xray_pool_code, ...).
+- name: Provision (or refresh) Xray VLESS+REALITY nodes
+  hosts: xray_nodes
+  become: true
+  gather_facts: true
+  roles:
+    - xray_node

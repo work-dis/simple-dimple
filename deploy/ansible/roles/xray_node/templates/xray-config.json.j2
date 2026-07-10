@@ -1,0 +1,29 @@
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "port": {{ xray_port }},
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          { "id": "{{ xray_client_uuid }}", "flow": "{{ xray_flow }}" }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "{{ xray_sni }}:443",
+          "xver": 0,
+          "serverNames": ["{{ xray_sni }}"],
+          "privateKey": "{{ xray_private_key }}",
+          "shortIds": ["{{ xray_short_id }}"]
+        }
+      }
+    }
+  ],
+  "outbounds": [{ "protocol": "freedom" }]
+}

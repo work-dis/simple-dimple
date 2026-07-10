@@ -15,15 +15,6 @@ export type ResolvedRouteDecision = {
 export function createBackendRuntime(databaseUrl?: string) {
   const store = createStateStore(databaseUrl);
 
-  async function loadState() {
-    return store.readState();
-  }
-
-  async function loadAuth(): Promise<AuthSessionSummary> {
-    const state = await loadState();
-    return state.auth;
-  }
-
   async function loadAuthContext(sessionId?: string | null) {
     return store.readAuthContext(sessionId);
   }
@@ -33,14 +24,27 @@ export function createBackendRuntime(databaseUrl?: string) {
     input?: ResolveRoutesBody | TelemetryNetworkContext | null
   ): Promise<ResolvedRouteDecision> {
     const routeContext = normalizeTelemetryContext(input);
-    const servers = await store.listServers(routeContext);
-    const routeHealth = await store.getHealthSnapshots(auth, routeContext);
+    // Порядок важен: persistedAssignment/lastKnownGoodRoute/manualEndpointId
+    // нужны ДО listServers(), чтобы передать их как pinnedEndpointIds —
+    // иначе bridge-модель (Decision 024) могла бы вырезать из списка уже
+    // активное подключение, последний рабочий маршрут или то, что клиент
+    // явно запросил.
     const persistedAssignment = await store.getCurrentAssignment(auth);
     const lastKnownGoodRoute = await store.getLastKnownGoodRoute(auth, routeContext);
     const manualEndpointId =
       input && "manualEndpointId" in input && typeof input.manualEndpointId === "string"
         ? input.manualEndpointId.trim()
         : "";
+    const pinnedEndpointIds = [
+      persistedAssignment?.endpointId ?? null,
+      lastKnownGoodRoute?.endpointId ?? null,
+      manualEndpointId || null
+    ].filter((id): id is string => Boolean(id));
+    const servers = await store.listServers(
+      routeContext,
+      auth.userId ? { subjectId: auth.userId, pinnedEndpointIds } : undefined
+    );
+    const routeHealth = await store.getHealthSnapshots(auth, routeContext);
     const manualServer = manualEndpointId ? servers.find((server) => server.id === manualEndpointId) : undefined;
     const currentAssignment = manualServer
       ? {
@@ -71,18 +75,10 @@ export function createBackendRuntime(databaseUrl?: string) {
     };
   }
 
-  async function resolveRouteDecisionForActiveAuth(input?: ResolveRoutesBody | TelemetryNetworkContext | null) {
-    const auth = await loadAuth();
-    return resolveRouteDecision(auth, input);
-  }
-
   return {
     store,
-    loadState,
-    loadAuth,
     loadAuthContext,
     resolveRouteDecision,
-    resolveRouteDecisionForActiveAuth,
     async disconnect() {
       await store.disconnect();
     }

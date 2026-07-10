@@ -75,15 +75,23 @@ Storage-слой разбит на модули (`backend/src/store/`): `utils`,
 ```
 simple-dimple/
 │
-├── compose.yaml              # Docker Compose: PostgreSQL для локальной разработки
+├── compose.yaml              # Docker Compose: PostgreSQL для dev + profile "prod" (локальный smoke-test деплой-образов)
+├── eslint.config.js          # ESLint 9 flat config (typescript-eslint + react-hooks для frontend), npm run lint
 ├── .github/
 │   └── workflows/
-│       └── ci.yml            # GitHub Actions: Prisma generate -> migrate -> check -> test -> build
+│       └── ci.yml            # GitHub Actions: quality (generate -> migrate -> check -> test -> build) + deploy-staging/deploy-prod
+├── deploy/
+│   ├── README.md             # Что нужно настроить в GitHub, чтобы deploy-job'ы заработали
+│   ├── compose.prod.yaml     # Compose для целевого сервера — тянет готовые образы из GHCR, ничего не собирает
+│   ├── nginx/
+│   │   └── frontend.conf     # nginx: раздача статики + reverse proxy /api на backend
+│   └── xray/                 # dev-инбаунд для Шага 2 (реальный VLESS+REALITY транспорт), см. docs/PRIORITY_PLAN.md
 ├── package.json              # Root — npm workspaces (backend + frontend)
 │
 ├── backend/                  # Node.js + Fastify + Prisma 7 + PostgreSQL
 │   ├── .env                  # Локальные переменные (не коммитить)
 │   ├── .env.example          # Шаблон переменных
+│   ├── Dockerfile            # Multi-stage build — тот же образ для API и route-reprobe worker (разный CMD)
 │   ├── package.json          # Зависимости и скрипты
 │   ├── tsconfig.json         # TypeScript конфигурация
 │   ├── prisma.config.ts      # Prisma 7 config (adapter-pg)
@@ -114,13 +122,23 @@ simple-dimple/
 │       │   │                 #   listServers, assignEndpoint, lastKnownGoodRoute (545 строк)
 │       │   ├── telemetry.ts  # Telemetry: probe reports, feedback, health snapshots,
 │       │   │                 #   rankings (211 строк)
-│       │   ├── admin.ts      # Admin: listUsers, updateAdmin, ops summary (203 строки)
+│       │   ├── admin.ts      # Admin: listUsers, updateAdmin, ops summary (263 строки,
+│       │   │                 #   аналитика вынесена ниже)
+│       │   ├── route-decision-ops.ts             # buildRouteDecisionOpsSummary (796 строк)
+│       │   ├── route-reprobe-execution-summary.ts # buildRouteReprobeExecutionSummary (673 строки)
+│       │   ├── ops-summary-shared.ts             # Общие pure-хелперы для двух билдеров выше (202 строки)
+│       │   ├── ops-alerts.ts             # createOpsAlertStore: cooldown/cadence/quiet-window policy (883 строки)
+│       │   ├── ops-alert-mappers.ts      # DB-строка → API-тип, replay-метаданные (122 строки)
+│       │   ├── ops-alert-messages.ts     # Текст алертов и watch-дайджеста (96 строк)
+│       │   ├── ops-alert-escalation.ts   # buildOpsAlertEscalationPreview (104 строки)
+│       │   ├── ops-alert-time-window.ts  # Чистые UTC-хелперы для quiet-window policy (35 строк)
 │       │   └── __tests__/
 │       │       └── ranking.test.ts  # Тесты ranking-логики
 │       └── generated/
 │           └── prisma/       # Prisma Client — сгенерированные типы и клиент
 │
 ├── frontend/                 # React + Vite + PWA (mobile-first)
+│   ├── Dockerfile            # Multi-stage build — vite build -> nginx (deploy/nginx/frontend.conf)
 │   ├── package.json          # Зависимости и скрипты
 │   ├── tsconfig.json         # TypeScript конфигурация
 │   ├── vite.config.ts        # Vite config + dev proxy на backend
@@ -150,7 +168,12 @@ simple-dimple/
 │           ├── ServerScreen.tsx   # Выбор сервера
 │           ├── AccountScreen.tsx  # Профиль, подписка, устройства
 │           ├── AuthForms.tsx      # Формы входа/регистрации
-│           ├── OpsScreen.tsx      # Ops-панель (только admin)
+│           ├── ops-screen/        # Ops-панель (только admin), разбита по секциям дашборда
+│           │   ├── OpsScreen.tsx  # Точка входа: gate + композиция секций (266 строк)
+│           │   ├── formatters.ts  # Общие форматтеры дат/severity
+│           │   ├── tiles.tsx      # Простые презентационные тайлы (Fleet/Endpoint/Network/...)
+│           │   ├── PersistedAlertTile.tsx  # Сложный интерактивный тайл алерта
+│           │   └── *Sections.tsx  # По файлу на домен дашборда (Alerts, Fleet, Worker, Quality, ...)
 │           ├── AdminScreen.tsx    # Admin-панель: пользователи, права
 │           └── ui/
 │               ├── index.ts      # Баррель
@@ -197,6 +220,7 @@ npm run dev
 ## Проверка
 
 ```bash
+npm run lint
 npm run check
 npm run build
 ```
@@ -206,9 +230,10 @@ CI в GitHub Actions прогоняет те же проверки послед�
 1. `npm ci`
 2. `npm run prisma:generate --workspace backend`
 3. `npm run prisma:migrate --workspace backend`
-4. `npm run ci:check`
-5. `npm run test --workspace backend`
-6. `npm run ci:build`
+4. `npm run lint`
+5. `npm run ci:check`
+6. `npm run test --workspace backend`
+7. `npm run ci:build`
 
 ## Что делаем дальше
 

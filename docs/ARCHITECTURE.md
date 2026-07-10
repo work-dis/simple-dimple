@@ -191,10 +191,48 @@ backend/src/store/
 │                       listServers, assignEndpoint, lastKnownGoodRoute
 ├── telemetry.ts      (211 строк) — submitProbeReport, recordRouteFeedback,
 │                       recordRouteWorkflowSnapshot, getHealthSnapshots, getRankings
-└── admin.ts          (203 строки) — listAdminUsers, updateAdmin, getOpsSummary
+├── admin.ts          (263 строки) — createAdminStore: listAdminUsers,
+│                       updateAdmin, getOpsSummary, getRouteDecisionOpsSummary
+│                       (только Prisma-CRUD; аналитика — в трёх файлах ниже)
+├── route-decision-ops.ts             (796 строк) — buildRouteDecisionOpsSummary
+├── route-reprobe-execution-summary.ts (673 строки) — buildRouteReprobeExecutionSummary
+├── ops-summary-shared.ts             (202 строки) — общие pure-хелперы/типы для
+│                       двух билдеров выше (median, percentile,
+│                       buildNetworkContextKey, DegradationWindow и т.д.)
+├── ops-alerts.ts             (883 строки) — createOpsAlertStore: cooldown/
+│                       cadence/quiet-window policy, delivery/digest flow
+├── ops-alert-mappers.ts      (122 строки) — DB-строка → API-тип, replay-метаданные
+├── ops-alert-messages.ts     (96 строк) — текст алертов и watch-дайджеста
+├── ops-alert-escalation.ts   (104 строки) — buildOpsAlertEscalationPreview
+└── ops-alert-time-window.ts  (35 строк) — чистые UTC-хелперы для quiet-window policy
 ```
 
 При разбиении модулей также был замечен дублирующийся `dynamic import` в `admin.ts`: функция `mapUserRowToAdminUserSummary` импортировалась дважды — статически (строка 21) и динамически (`await import("./utils.js")`). Динамический импорт удалён, функция используется из статического импорта.
+
+### Дальнейшее разбиение: admin.ts и ops-alerts.ts (2026-07-10)
+
+`admin.ts` и `ops-alerts.ts` сами доросли до 1884 и 1213 строк соответственно
+— каждый содержал один домен, но домен смешивал Prisma-CRUD с большими
+чистыми функциями. Разбиты по тому же принципу, что и монолит выше:
+
+- **`admin.ts`** — `buildRouteDecisionOpsSummary` (~770 строк) и
+  `buildRouteReprobeExecutionSummary` (~650 строк) не трогают Prisma вообще
+  (принимают уже загруженные строки, возвращают summary-объект) — вынесены
+  в `route-decision-ops.ts`/`route-reprobe-execution-summary.ts`. Оба билдера
+  делят один и тот же набор pure-хелперов (`median`, `buildNetworkContextKey`
+  и т.д.) — эти хелперы вынесены в третий файл (`ops-summary-shared.ts`),
+  а не продублированы и не оставлены в файле-импортёре, из которого второй
+  файл был бы вынужден их импортировать обратно (circular import).
+- **`ops-alerts.ts`** — мапперы (DB-строка → API-тип), билдеры текста
+  сообщений и `buildOpsAlertEscalationPreview` не зависят от `prisma` —
+  вынесены в `ops-alert-mappers.ts`/`ops-alert-messages.ts`/
+  `ops-alert-escalation.ts`. Cooldown/cadence/quiet-window policy-функции
+  **намеренно оставлены** внутри `createOpsAlertStore`: они читают
+  `prisma`/`getNow()`/конфиг из замыкания фабрики, а сам файл уже объясняет
+  комментарием, почему store-методы держатся на одном объекте, а не
+  экспортируются по отдельности (`this`-биндинг, на который завязан
+  `state-store.ts`, см. Decision 017) — вынос этих функций наружу означал бы
+  протаскивать 4-5 параметров через каждый вызов ради сомнительного выигрыша.
 
 `state-store.ts` (82 строки) остаётся фасадом — только импортит модули и композирует их в единый `StateStore`.
 

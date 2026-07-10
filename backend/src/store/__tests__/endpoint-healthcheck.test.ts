@@ -4,7 +4,7 @@ import { createEndpointHealthCheckStore } from "../endpoint-healthcheck.js";
 
 function createPrismaStub(input: {
   endpoints: Array<{ id: string; ipAddress: string; transportConfig: { port: number } | null }>;
-  endpointRow: { isActive: boolean; consecutiveHealthFailures: number } | null;
+  endpointRow: { isActive: boolean; consecutiveHealthFailures: number; retiredReason?: string | null } | null;
 }) {
   const updateCalls: Array<{ where: { id: string }; data: Record<string, unknown> }> = [];
 
@@ -74,7 +74,7 @@ describe("createEndpointHealthCheckStore.applyHealthCheckResult", () => {
     });
   });
 
-  it("deactivates the endpoint once the failure streak reaches the threshold", async () => {
+  it("deactivates the endpoint once the failure streak reaches the threshold, tagging it as auto-retired", async () => {
     const { prisma, updateCalls } = createPrismaStub({
       endpoints: [],
       endpointRow: { isActive: true, consecutiveHealthFailures: 2 }
@@ -85,14 +85,16 @@ describe("createEndpointHealthCheckStore.applyHealthCheckResult", () => {
 
     expect(updateCalls[0].data).toMatchObject({
       isActive: false,
-      consecutiveHealthFailures: 3
+      consecutiveHealthFailures: 3,
+      retiredReason: "auto_health_failure"
     });
+    expect(updateCalls[0].data.retiredAt).toBeInstanceOf(Date);
   });
 
-  it("reactivates a previously deactivated endpoint once it becomes reachable again", async () => {
+  it("reactivates a previously auto-deactivated endpoint once it becomes reachable again, clearing retire-audit", async () => {
     const { prisma, updateCalls } = createPrismaStub({
       endpoints: [],
-      endpointRow: { isActive: false, consecutiveHealthFailures: 5 }
+      endpointRow: { isActive: false, consecutiveHealthFailures: 5, retiredReason: "auto_health_failure" }
     });
     const store = createEndpointHealthCheckStore(prisma as never);
 
@@ -100,7 +102,44 @@ describe("createEndpointHealthCheckStore.applyHealthCheckResult", () => {
 
     expect(updateCalls[0].data).toMatchObject({
       isActive: true,
-      consecutiveHealthFailures: 0
+      consecutiveHealthFailures: 0,
+      retiredAt: null,
+      retiredReason: null
+    });
+  });
+
+  it("does NOT auto-reactivate a manually retired endpoint on a successful probe, only refreshes metrics", async () => {
+    const { prisma, updateCalls } = createPrismaStub({
+      endpoints: [],
+      endpointRow: { isActive: false, consecutiveHealthFailures: 5, retiredReason: "manual" }
+    });
+    const store = createEndpointHealthCheckStore(prisma as never);
+
+    await store.applyHealthCheckResult({ endpointId: "de-fra-1", ok: true, latencyMs: 30, error: null });
+
+    expect(updateCalls[0].data).toMatchObject({
+      isActive: false,
+      lastHealthCheckOk: true,
+      lastHealthCheckLatencyMs: 30,
+      // failure streak left untouched — not reset, since this isn't a real recovery
+      consecutiveHealthFailures: 5
+    });
+    expect(updateCalls[0].data.retiredReason).toBeUndefined();
+  });
+
+  it("does not touch failure streak or retire-audit for a manually retired endpoint that fails a probe", async () => {
+    const { prisma, updateCalls } = createPrismaStub({
+      endpoints: [],
+      endpointRow: { isActive: false, consecutiveHealthFailures: 5, retiredReason: "manual" }
+    });
+    const store = createEndpointHealthCheckStore(prisma as never);
+
+    await store.applyHealthCheckResult({ endpointId: "de-fra-1", ok: false, latencyMs: null, error: "timeout" });
+
+    expect(updateCalls[0].data).toEqual({
+      lastHealthCheckAt: expect.any(Date),
+      lastHealthCheckOk: false,
+      lastHealthCheckLatencyMs: null
     });
   });
 

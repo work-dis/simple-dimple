@@ -58,12 +58,14 @@ enum OpsAlertDeliveryStatus {
   failed
 }
 
-model AppSession {
-  id             String   @id
+model ConnectionState {
+  id             String   @id @default(uuid())
+  userId         String   @unique
   status         String
   activeServerId String
   updatedAt      DateTime
   connectCount   Int
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model ServerPool {
@@ -98,6 +100,14 @@ model Endpoint {
   lastHealthCheckOk Boolean?
   lastHealthCheckLatencyMs Int?
   consecutiveHealthFailures Int @default(0)
+  // Retire-аудит (Шаг 5, PRIORITY_PLAN.md): различаем "администратор явно
+  // вывел ноду" (retiredReason="manual") от "healthcheck-воркер сам погасил
+  // после N неудачных пингов" (retiredReason="auto_health_failure") — иначе
+  // Ops не может отличить осознанный retire от временного сетевого сбоя.
+  // Manual retire "залипает": healthcheck success не должен молча
+  // реактивировать ноду, которую администратор вывел из ротации явно.
+  retiredAt        DateTime?
+  retiredReason    String?
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
   serverPool       ServerPool @relation(fields: [serverPoolId], references: [id], onDelete: Cascade)
@@ -154,6 +164,7 @@ model User {
   passwordCredential PasswordCredential?
   userEndpointAssignments UserEndpointAssignment[]
   lastKnownGoodRoutes LastKnownGoodRoute[]
+  connectionState ConnectionState?
 }
 
 model Subscription {
@@ -239,13 +250,15 @@ model AuthSession {
 }
 
 model PasswordCredential {
-  id           String   @id
-  userId       String   @unique
-  login        String   @unique
-  passwordHash String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                  String    @id
+  userId              String    @unique
+  login               String    @unique
+  passwordHash        String
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model VerificationChallenge {

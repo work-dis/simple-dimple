@@ -1,0 +1,47 @@
+# TLS-терминатор для control-plane (Шаг 4, PRIORITY_PLAN.md; Decision 039/040,
+# DECISIONS.md). До этого файла nginx (frontend.conf) слушал только :80, а
+# backend публиковал голый :8080 — пароли, OTP-коды и x-auth-session-id
+# ходили в открытом виде до самого пользователя. Caddy стоит перед frontend
+# (единственный контейнер с портами наружу, см. compose.prod.yaml), сам
+# получает сертификат и проксирует расшифрованный трафик на frontend:80
+# внутри docker-сети — nginx/backend по-прежнему HTTP, но уже не наружу.
+#
+# CONTROL_PLANE_DOMAIN (deploy/.env) ОБЯЗАТЕЛЕН всегда — либо реальный
+# домен, либо голый IP VPS. Проверено вживую (Decision 040): адрес-заглушка
+# ":443" без явного хоста НЕ работает даже с `tls internal` — Caddy не
+# знает, для какого SNI/IP заранее выпускать сертификат, и роняет TLS
+# handshake ("tlsv1 alert internal error") на любом входящем соединении.
+# Явный хост (домен или IP) в адресе сайта обязателен в обоих режимах.
+#
+# Режим переключается через ACME_EMAIL (deploy/.env, Decision 040):
+#   - ACME_EMAIL закомментирован (по умолчанию) — `tls internal`: Caddy сам
+#     создаёт локальный CA и самоподписанный сертификат на CONTROL_PLANE_DOMAIN
+#     (домен или IP — Caddy поддерживает IP SAN). Работает сразу, без
+#     публичного DNS, но браузер/клиент покажет "небезопасное соединение" —
+#     ожидаемо для self-signed, нужно явно принять исключение (или довериться
+#     CA-сертификату caddy на устройстве). Годится для staging/теста.
+#   - ACME_EMAIL заполнен — настоящий Let's Encrypt по CONTROL_PLANE_DOMAIN
+#     (обязан быть реальным доменом, ACME HTTP-01 на :80). Домен должен
+#     A-записью указывать на IP VPS до первого запуска.
+#
+# default_sni (Decision 041, DECISIONS.md): найдено вживую на реальном VPS —
+# при подключении по голому IP (а не домену) большинство клиентов (curl,
+# браузеры) НЕ отправляют SNI в ClientHello вообще (SNI по RFC 6066 определён
+# для имён, не для IP-литералов) — без default_sni Caddy не может подобрать
+# сертификат для соединения без SNI и роняет handshake ("tlsv1 alert
+# internal error") на КАЖДОМ запросе по IP, хотя тот же сертификат отдаётся
+# нормально при явном -servername. С доменом (не IP) эта проблема не
+# возникает — клиенты всегда шлют SNI для доменных имён.
+{
+	default_sni {$CONTROL_PLANE_DOMAIN}
+}
+
+{$CONTROL_PLANE_DOMAIN} {
+	tls {$ACME_EMAIL:internal}
+
+	encode gzip
+
+	reverse_proxy frontend:80 {
+		header_up X-Forwarded-Proto https
+	}
+}

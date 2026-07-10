@@ -20,3 +20,44 @@ export type AdminUsersResponse = {
 export type UpdateAdminUserResponse = {
   user: AdminUserSummary;
 };
+
+// Шаг 5 (PRIORITY_PLAN.md) — fleet provisioning для Xray-нод.
+export type AdminEndpointTransportSummary = {
+  port: number;
+  sni: string;
+  fingerprint: string;
+  flow: string;
+  shortId: string;
+};
+
+export type AdminEndpointSummary = {
+  id: string;
+  label: string;
+  provider: string;
+  asn: number | null;
+  countryCode: string;
+  city: string | null;
+  poolCode: string;
+  region: string | null;
+  ipAddress: string;
+  protocol: string;
+  transportProfile: string;
+  latencyMs: number;
+  loadPercent: number;
+  isActive: boolean;
+  lastHealthCheckAt: string | null;
+  lastHealthCheckOk: boolean | null;
+  consecutiveHealthFailures: number;
+  retiredAt: string | null;
+  retiredReason: string | null;
+  transport: AdminEndpointTransportSummary | null;
+  createdAt: string;
+};
+
+export type AdminEndpointsResponse = {
+  endpoints: AdminEndpointSummary[];
+};
+
+export type SetAdminEndpointActiveResponse = {
+  endpoint: AdminEndpointSummary;
+};

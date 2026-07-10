@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Control-plane VPS (57.128.220.83) runs Caddy in `tls internal` mode
+  (Decision 040/041, docs/DECISIONS.md) — no public DNS, self-signed cert
+  off a local Caddy CA. Android does not trust user/self-signed CAs by
+  default for app targeting API 24+, so we bundle the CA root here instead
+  of asking the user to install it manually. Cert is 10y-valid (self-signed
+  root), safe to bundle; only the leaf/intermediate rotate.
+-->
+<network-security-config>
+    <domain-config>
+        <domain includeSubdomains="false">57.128.220.83</domain>
+        <trust-anchors>
+            <certificates src="@raw/caddy_root_ca" />
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+</network-security-config>

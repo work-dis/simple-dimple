@@ -14,10 +14,11 @@ import type {
   VerificationChallengeProvider
 } from "../types.js";
 import {
-  StoreAuthError,
+  StoreError,
   hashPassword,
   verifyPassword,
   normalizeAuthSession,
+  normalizeVerificationTarget,
   mapUserRowToAccount,
   trimmedContactLooksLikeEmail,
   cloneDefaultAccount,
@@ -44,44 +45,23 @@ export const authSessionTtlMs = 30 * 24 * 60 * 60 * 1000;
 // перебрать в пределах его 10-минутного окна жизни.
 export const maxVerificationAttempts = 5;
 
+// Минимальный интервал между выдачей новых OTP на один и тот же (provider, target).
+// Раньше единственной защитой /api/auth/challenge был глобальный IP rate limit
+// (100 req/min) — этого мало: с одного IP можно было "бомбить" чужую почту кодами
+// (до 100 писем/мин) и заодно перечислять цели по факту доставки/ошибки. Cooldown
+// делает точечный спам на конкретный target невозможным независимо от того, сколько
+// IP его шлют.
+export const challengeRequestCooldownMs = 60 * 1000;
+
+// Максимальное число неверных попыток пароля на один аккаунт, после чего логин
+// временно блокируется. Аналогично OTP-защите: глобального IP-лимита недостаточно
+// против перебора пароля на конкретный аккаунт (100 попыток/мин при минимальной
+// длине пароля 6 символов).
+export const maxLoginAttempts = 5;
+export const loginLockoutMs = 15 * 60 * 1000;
+
 export function createAuthStore(prisma: PrismaClient, transport: MessageTransport) {
-  async function activateCredentialsSession(userId: string) {
-    const expiresAt = new Date(Date.now() + authSessionTtlMs);
-    const nextAuthSession = normalizeAuthSession({
-      id: randomUUID(),
-      userId,
-      provider: "credentials",
-      status: "active",
-      isAuthenticated: true,
-      lastAuthenticatedAt: new Date().toISOString(),
-      expiresAt: expiresAt.toISOString()
-    });
-
-    await prisma.authSession.upsert({
-      where: { id: nextAuthSession.id },
-      update: {
-        userId: nextAuthSession.userId,
-        provider: AuthProvider.credentials,
-        status: AuthSessionStatus.active,
-        lastAuthenticatedAt: nextAuthSession.lastAuthenticatedAt ? new Date(nextAuthSession.lastAuthenticatedAt) : null,
-        expiresAt,
-        revokedAt: null
-      },
-      create: {
-        id: nextAuthSession.id,
-        userId: nextAuthSession.userId,
-        provider: AuthProvider.credentials,
-        status: AuthSessionStatus.active,
-        lastAuthenticatedAt: nextAuthSession.lastAuthenticatedAt ? new Date(nextAuthSession.lastAuthenticatedAt) : null,
-        expiresAt,
-        revokedAt: null
-      }
-    });
-
-    return nextAuthSession;
-  }
-
-  async function activateSessionForProvider(userId: string, provider: VerificationChallengeProvider) {
+  async function activateSession(userId: string, provider: "credentials" | VerificationChallengeProvider) {
     const expiresAt = new Date(Date.now() + authSessionTtlMs);
     const nextAuthSession = normalizeAuthSession({
       id: randomUUID(),
@@ -92,12 +72,13 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
       lastAuthenticatedAt: new Date().toISOString(),
       expiresAt: expiresAt.toISOString()
     });
+    const prismaProvider = AuthProvider[provider];
 
     await prisma.authSession.upsert({
       where: { id: nextAuthSession.id },
       update: {
         userId: nextAuthSession.userId,
-        provider: provider === "email" ? AuthProvider.email : AuthProvider.telegram,
+        provider: prismaProvider,
         status: AuthSessionStatus.active,
         lastAuthenticatedAt: nextAuthSession.lastAuthenticatedAt ? new Date(nextAuthSession.lastAuthenticatedAt) : null,
         expiresAt,
@@ -106,7 +87,7 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
       create: {
         id: nextAuthSession.id,
         userId: nextAuthSession.userId,
-        provider: provider === "email" ? AuthProvider.email : AuthProvider.telegram,
+        provider: prismaProvider,
         status: AuthSessionStatus.active,
         lastAuthenticatedAt: nextAuthSession.lastAuthenticatedAt ? new Date(nextAuthSession.lastAuthenticatedAt) : null,
         expiresAt,
@@ -161,20 +142,53 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
       });
 
       if (!credential) {
-        throw new StoreAuthError("Invalid login or password", 401);
+        throw new StoreError("Invalid login or password", 401);
+      }
+
+      if (credential.lockedUntil && credential.lockedUntil.getTime() > Date.now()) {
+        throw new StoreError("Too many failed attempts, try again later", 429);
       }
 
       const isPasswordValid = await verifyPassword(input.password, credential.passwordHash);
 
       if (!isPasswordValid) {
-        throw new StoreAuthError("Invalid login or password", 401);
+        // Считаем неверные попытки пароля на конкретный аккаунт. Исчерпав лимит,
+        // временно блокируем логин на loginLockoutMs — это не даёт перебирать пароль
+        // на один и тот же аккаунт быстрее, чем позволяет lockout, независимо от
+        // того, с какого числа IP идёт перебор.
+        const nextAttempts = credential.failedLoginAttempts + 1;
+        const attemptsExhausted = nextAttempts >= maxLoginAttempts;
+
+        await prisma.passwordCredential.update({
+          where: { id: credential.id },
+          data: {
+            failedLoginAttempts: attemptsExhausted ? 0 : nextAttempts,
+            lockedUntil: attemptsExhausted ? new Date(Date.now() + loginLockoutMs) : null
+          }
+        });
+
+        if (attemptsExhausted) {
+          throw new StoreError("Too many failed attempts, try again later", 429);
+        }
+
+        throw new StoreError("Invalid login or password", 401);
       }
 
       if (credential.user.status === UserStatus.blocked) {
-        throw new StoreAuthError("Account is blocked", 403);
+        throw new StoreError("Account is blocked", 403);
       }
 
-      const nextAuthSession = await activateCredentialsSession(credential.userId);
+      if (credential.failedLoginAttempts > 0 || credential.lockedUntil) {
+        await prisma.passwordCredential.update({
+          where: { id: credential.id },
+          data: {
+            failedLoginAttempts: 0,
+            lockedUntil: null
+          }
+        });
+      }
+
+      const nextAuthSession = await activateSession(credential.userId, "credentials");
 
       return {
         auth: nextAuthSession,
@@ -188,7 +202,7 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
       });
 
       if (existingCredential) {
-        throw new StoreAuthError("Login is already taken", 409);
+        throw new StoreError("Login is already taken", 409);
       }
 
       const passwordHash = await hashPassword(input.password);
@@ -230,7 +244,7 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
         });
       });
 
-      const nextAuthSession = await activateCredentialsSession(userId);
+      const nextAuthSession = await activateSession(userId, "credentials");
       const nextAccount = await loadUserAccountById(prisma, userId);
 
       return {
@@ -241,10 +255,34 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
 
     async requestAuthChallenge(input: Required<RequestAuthChallengeBody>): Promise<{ challengeId: string; provider: VerificationChallengeProvider; target: string; expiresAt: string }> {
       if (input.provider !== "email" && input.provider !== "telegram") {
-        throw new StoreAuthError("Unsupported verification provider", 400);
+        throw new StoreError("Unsupported verification provider", 400);
       }
 
       const target = normalizeVerificationTarget(input.provider, input.target);
+      const normalizedProvider = input.provider === "email" ? AuthProvider.email : AuthProvider.telegram;
+
+      const mostRecentChallenge = await prisma.verificationChallenge.findFirst({
+        where: {
+          provider: normalizedProvider,
+          target
+        },
+        orderBy: {
+          createdAt: "desc"
+        }
+      });
+
+      if (mostRecentChallenge) {
+        const elapsedMs = Date.now() - mostRecentChallenge.createdAt.getTime();
+
+        if (elapsedMs < challengeRequestCooldownMs) {
+          const retryAfterSeconds = Math.ceil((challengeRequestCooldownMs - elapsedMs) / 1000);
+          throw new StoreError(
+            `Too many requests, please wait ${retryAfterSeconds}s before requesting another code`,
+            429
+          );
+        }
+      }
+
       // CSPRNG вместо Math.random(): состояние обычного PRNG предсказуемо и
       // 6-значный OTP из него теоретически восстановим. randomInt даёт
       // криптографически стойкое значение в диапазоне [100000, 1000000).
@@ -255,7 +293,7 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
 
       await prisma.verificationChallenge.updateMany({
         where: {
-          provider: input.provider === "email" ? AuthProvider.email : AuthProvider.telegram,
+          provider: normalizedProvider,
           target,
           status: VerificationChallengeStatus.pending
         },
@@ -268,7 +306,7 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
         data: {
           id: randomUUID(),
           userId: existingUser?.id ?? null,
-          provider: input.provider === "email" ? AuthProvider.email : AuthProvider.telegram,
+          provider: normalizedProvider,
           target,
           codeHash,
           status: VerificationChallengeStatus.pending,
@@ -289,7 +327,7 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
           `[auth-challenge] transport not configured, dev fallback: challengeId=${challenge.id} target=${target} code=${code}`
         );
       } else if (deliveryResult.status === "failed") {
-        throw new StoreAuthError("Failed to deliver verification code", 502);
+        throw new StoreError("Failed to deliver verification code", 502);
       }
 
       return {
@@ -306,11 +344,11 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
       });
 
       if (!challenge) {
-        throw new StoreAuthError("Verification challenge not found", 404);
+        throw new StoreError("Verification challenge not found", 404);
       }
 
       if (challenge.status !== VerificationChallengeStatus.pending) {
-        throw new StoreAuthError("Verification challenge is no longer active", 400);
+        throw new StoreError("Verification challenge is no longer active", 400);
       }
 
       if (challenge.expiresAt.getTime() <= Date.now()) {
@@ -320,7 +358,7 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
             status: VerificationChallengeStatus.expired
           }
         });
-        throw new StoreAuthError("Verification code has expired", 410);
+        throw new StoreError("Verification code has expired", 410);
       }
 
       const isCodeValid = await verifyPassword(input.code, challenge.codeHash);
@@ -341,10 +379,10 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
         });
 
         if (attemptsExhausted) {
-          throw new StoreAuthError("Too many invalid attempts, request a new verification code", 429);
+          throw new StoreError("Too many invalid attempts, request a new verification code", 429);
         }
 
-        throw new StoreAuthError("Invalid verification code", 401);
+        throw new StoreError("Invalid verification code", 401);
       }
 
       const provider = challenge.provider === AuthProvider.email ? "email" : "telegram";
@@ -404,14 +442,14 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
       }
 
       if (!userRow) {
-        throw new StoreAuthError("Verified user could not be loaded", 500);
+        throw new StoreError("Verified user could not be loaded", 500);
       }
 
       if (userRow.status === UserStatus.blocked) {
-        throw new StoreAuthError("Account is blocked", 403);
+        throw new StoreError("Account is blocked", 403);
       }
 
-      const nextAuthSession = await activateSessionForProvider(userRow.id, provider);
+      const nextAuthSession = await activateSession(userRow.id, provider);
 
       return {
         auth: nextAuthSession,
@@ -455,6 +493,3 @@ export function createAuthStore(prisma: PrismaClient, transport: MessageTranspor
     }
   };
 }
-
-// Re-export for backward compatibility with normalizeVerificationTarget usage
-import { normalizeVerificationTarget } from "./utils.js";

@@ -1,6 +1,6 @@
 import type { RouteDecisionOpsInventoryHealth } from "./types.js";
 
-export const MINIMUM_INDEPENDENT_FAILURE_DOMAINS = 3;
+export const MINIMUM_INDEPENDENT_FAILURE_DOMAINS = 2;
 
 export type InventoryPolicyRecord = {
   endpointId: string;

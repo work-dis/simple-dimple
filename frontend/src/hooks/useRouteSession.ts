@@ -1,20 +1,81 @@
 import { useState } from "react";
 
-import { HttpError, connectNativeTunnel, disconnectNativeTunnel, isNativeTunnelAvailable, readJson } from "../lib";
+import {
+  HttpError,
+  connectNativeTunnel,
+  connectWithFallback,
+  disconnectNativeTunnel,
+  getStoredAuthSessionId,
+  isNativeTunnelAvailable,
+  readJson,
+  resolveApiUrl,
+} from "../lib";
 import { buildRouteContext, submitProbeReport } from "../lib/network";
+import { enqueueTelemetryReport } from "../lib/telemetryQueue";
 import type {
   ConnectionConfigSummary,
   EndpointAssignment,
   RouteHealthSnapshot,
   RoutePolicy,
+  RoutePolicyCandidate,
   ServerOption,
   Session,
   SessionResponse,
+  TelemetryFailureReason,
 } from "../types";
 
 interface UseRouteSessionOptions {
   onClearError: () => void;
   onError: (message: string) => void;
+}
+
+// Шаг 3 (PRIORITY_PLAN.md) — достаёт connectionConfig для конкретного
+// кандидата из shortlist через чистый resolve-контракт (не трогает
+// session.status), чтобы auto-fallback executor мог пробовать кандидатов
+// один за другим без побочных эффектов на каждой попытке.
+async function fetchCandidateConnectionConfig(endpointId: string): Promise<ConnectionConfigSummary | null> {
+  try {
+    const query = buildRouteContext();
+    const data = await readJson<{ connectionConfig: ConnectionConfigSummary | null }>("/api/routes/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ manualEndpointId: endpointId, includeServers: false, ...query }),
+    });
+    return data.connectionConfig ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Шлёт feedback о провале конкретного кандидата раньше перехода к следующему —
+// best-effort, той же философии, что и submitProbeReport в lib/network.ts.
+// Если отправка не удалась, отчёт кэшируется через telemetryQueue и досылается
+// позже (Этап 8, ROADMAP.md), а не теряется молча.
+async function reportCandidateFailure(candidate: RoutePolicyCandidate, failureReason: TelemetryFailureReason) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const sessionId = getStoredAuthSessionId();
+  if (sessionId) {
+    headers["x-auth-session-id"] = sessionId;
+  }
+  const url = resolveApiUrl("/api/routes/feedback");
+  const body = JSON.stringify({
+    endpointId: candidate.endpointId,
+    transportProfile: candidate.transportProfile,
+    result: "failed",
+    failureReason,
+    occurredAt: new Date().toISOString(),
+    source: "connect",
+    ...buildRouteContext(),
+  });
+
+  try {
+    const response = await fetch(url, { method: "POST", headers, body });
+    if (!response.ok) {
+      enqueueTelemetryReport(url, body, headers);
+    }
+  } catch {
+    enqueueTelemetryReport(url, body, headers);
+  }
 }
 
 export function useRouteSession({
@@ -103,10 +164,46 @@ export function useRouteSession({
       setRouteHealth(data.routeHealth);
       setRoutePolicy(data.routePolicy);
       setConnectionConfig(data.connectionConfig ?? null);
-      await applyNativeTunnel(data.session.status, data.connectionConfig ?? null);
+
+      let finalActiveServerId = data.session.activeServerId;
+
+      if (data.session.status === "connected" && data.connectionConfig && isNativeTunnelAvailable()) {
+        // Шаг 3 (PRIORITY_PLAN.md) — recommended-кандидат может реально не
+        // подняться на устройстве; проходим по routePolicy.shortlist сами
+        // вместо того, чтобы требовать ручного похода на экран Server.
+        const outcome = await connectWithFallback(data.routePolicy.shortlist, data.connectionConfig, {
+          attemptTunnel: connectNativeTunnel,
+          fetchCandidateConfig: fetchCandidateConnectionConfig,
+          reportFailure: reportCandidateFailure,
+        });
+
+        if (!outcome.ok) {
+          onError("Не удалось подключиться ни к одному серверу из списка");
+        } else if (outcome.endpointId && outcome.candidate && outcome.endpointId !== data.session.activeServerId) {
+          // Fallback выбрал не recommended-кандидата — подтверждаем выбор
+          // официально с честным (не "manual_select") assignmentReason.
+          const switched = await readJson<SessionResponse>("/api/server", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              serverId: outcome.endpointId,
+              assignmentReason: outcome.candidate.assignmentReason,
+              ...buildRouteContext(),
+            }),
+          });
+          setSession(switched.session);
+          setCurrentAssignment(switched.currentAssignment);
+          setRouteHealth(switched.routeHealth);
+          setRoutePolicy(switched.routePolicy);
+          setConnectionConfig(switched.connectionConfig ?? null);
+          finalActiveServerId = switched.session.activeServerId;
+        }
+      } else {
+        await applyNativeTunnel(data.session.status, data.connectionConfig ?? null);
+      }
 
       if (data.session.status === "connected") {
-        const nextServer = servers.find((server) => server.id === data.session.activeServerId);
+        const nextServer = servers.find((server) => server.id === finalActiveServerId);
         if (nextServer) void submitProbeReport(nextServer);
       }
     } catch (nextError) {

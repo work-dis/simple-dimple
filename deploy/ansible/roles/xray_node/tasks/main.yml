@@ -1,0 +1,224 @@
+---
+# Ansible equivalent of deploy/xray/provision-node.sh register/retire — Шаг 5
+# (docs/PRIORITY_PLAN.md), written once the fleet actually had a second real
+# provider (Contabo, see docs/DECISIONS.md Decision 030) to justify
+# multi-host automation instead of running the bash script by hand over SSH.
+#
+# Unlike provision-node.sh (always regenerates keys/uuid/shortId on every
+# `register` run, even against an already-provisioned node), this role is
+# idempotent: crypto material is generated once and reused on re-runs by
+# reading it back from the node's own config.json + a small sidecar file for
+# the values REALITY doesn't need server-side (public key, fingerprint).
+
+- name: Retire this node in the control-plane
+  when: xray_state == "absent"
+  block:
+    # Matches deploy/xray/provision-node.sh retire semantics exactly: only
+    # flips isActive in the control-plane (same effect as the Ops "Retire"
+    # button). The container keeps running on the host — decommissioning the
+    # VPS itself is a separate, explicit action, not implied by "retire".
+    - name: PATCH endpoint isActive=false
+      ansible.builtin.uri:
+        url: "{{ xray_api_base }}/api/admin/endpoints/{{ xray_endpoint_id }}"
+        method: PATCH
+        headers:
+          Content-Type: application/json
+          x-auth-session-id: "{{ xray_admin_session }}"
+        body_format: json
+        body:
+          isActive: false
+        status_code: 200
+      delegate_to: localhost
+      become: false
+
+- name: Provision (or refresh) this node
+  when: xray_state == "present"
+  block:
+    - name: Check for an existing docker binary
+      ansible.builtin.command: which docker
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Docker via get.docker.com
+      ansible.builtin.shell: |
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+        sh /tmp/get-docker.sh
+      args:
+        creates: /usr/bin/docker
+      when: docker_check.rc != 0
+
+    - name: Detect public IP (only if not given in inventory)
+      # api.ipify.org, not ifconfig.me: (a) ifconfig.me's root path serves an
+      # HTML page to non-curl UAs like ansible-httpget's default, silently
+      # poisoning ipAddress with a full HTML blob the first time this was
+      # tried against a live host; (b) even ifconfig.me/ip returned the
+      # host's IPv6 address on a dual-stack VPS where IPv6 routing wins,
+      # while the rest of this project's inventory assumes IPv4 — ipify's
+      # api.ipify.org (as opposed to api64.ipify.org) is IPv4-only by design.
+      ansible.builtin.uri:
+        url: https://api.ipify.org
+        return_content: true
+      register: detected_ip
+      when: xray_ip_address is not defined or (xray_ip_address | default('')) | length == 0
+
+    - name: Set effective IP address
+      ansible.builtin.set_fact:
+        effective_ip_address: "{{ xray_ip_address | default(detected_ip.content | default('') | trim, true) }}"
+
+    - name: Ensure config directory exists
+      ansible.builtin.file:
+        path: "/etc/xray-{{ xray_pool_code }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check whether this pool was already provisioned on this host
+      ansible.builtin.stat:
+        path: "/etc/xray-{{ xray_pool_code }}/config.json"
+      register: existing_config
+
+    - name: Reuse crypto material from a previous run
+      when: existing_config.stat.exists
+      block:
+        - name: Read existing server config
+          ansible.builtin.slurp:
+            src: "/etc/xray-{{ xray_pool_code }}/config.json"
+          register: existing_config_raw
+
+        - name: Read sidecar file with public key / fingerprint
+          ansible.builtin.slurp:
+            src: "/etc/xray-{{ xray_pool_code }}/client-meta.json"
+          register: existing_meta_raw
+
+        - name: Parse existing config + sidecar
+          ansible.builtin.set_fact:
+            existing_config_json: "{{ existing_config_raw.content | b64decode | from_json }}"
+            existing_meta_json: "{{ existing_meta_raw.content | b64decode | from_json }}"
+
+        - name: Restore facts from disk (no key rotation on re-run)
+          ansible.builtin.set_fact:
+            xray_private_key: "{{ existing_config_json.inbounds[0].streamSettings.realitySettings.privateKey }}"
+            xray_short_id: "{{ existing_config_json.inbounds[0].streamSettings.realitySettings.shortIds[0] }}"
+            xray_client_uuid: "{{ existing_config_json.inbounds[0].settings.clients[0].id }}"
+            xray_sni: "{{ existing_config_json.inbounds[0].streamSettings.realitySettings.serverNames[0] }}"
+            xray_public_key: "{{ existing_meta_json.publicKey }}"
+            xray_fingerprint: "{{ existing_meta_json.fingerprint }}"
+
+    - name: Generate new crypto material (first provisioning of this pool only)
+      when: not existing_config.stat.exists
+      block:
+        - name: Generate X25519 keypair via xray-core
+          ansible.builtin.command: docker run --rm ghcr.io/xtls/xray-core:latest x25519
+          register: keypair_output
+
+        - name: Generate REALITY short id
+          ansible.builtin.command: openssl rand -hex 8
+          register: short_id_output
+
+        - name: Generate per-node client uuid
+          ansible.builtin.command: cat /proc/sys/kernel/random/uuid
+          register: uuid_output
+
+        - name: Pick sni/fingerprint from the decoy pool
+          ansible.builtin.set_fact:
+            xray_sni: "{{ xray_sni_pool | random }}"
+            xray_fingerprint: "{{ xray_fingerprint_pool | random }}"
+
+        # xray-core x25519 output looks like:
+        #   PrivateKey: <key>
+        #   Password (PublicKey): <key>
+        #   Hash32: <key>
+        # (no space in "PrivateKey", label for the public key isn't literally
+        # "Public key" — match loosely on "Private"/"Public" like
+        # provision-node.sh's `grep -i` does, then strip up to the last colon).
+        - name: Store generated crypto material as facts
+          ansible.builtin.set_fact:
+            xray_private_key: "{{ keypair_output.stdout_lines | select('search', 'Private') | first | regex_replace('^.*:\\s*', '') }}"
+            xray_public_key: "{{ keypair_output.stdout_lines | select('search', 'Public') | first | regex_replace('^.*:\\s*', '') }}"
+            xray_short_id: "{{ short_id_output.stdout | trim }}"
+            xray_client_uuid: "{{ uuid_output.stdout | trim }}"
+
+    - name: Write Xray server config
+      ansible.builtin.template:
+        src: xray-config.json.j2
+        dest: "/etc/xray-{{ xray_pool_code }}/config.json"
+        mode: "0644"
+      register: config_file
+
+    - name: Write sidecar metadata (public key / fingerprint, not needed server-side)
+      ansible.builtin.copy:
+        content: "{{ {'publicKey': xray_public_key, 'fingerprint': xray_fingerprint} | to_nice_json }}"
+        dest: "/etc/xray-{{ xray_pool_code }}/client-meta.json"
+        mode: "0644"
+
+    - name: Start/replace the Xray container if config changed or container missing
+      ansible.builtin.shell: |
+        docker rm -f "simple-dimple-xray-{{ xray_pool_code }}" >/dev/null 2>&1 || true
+        docker run -d \
+          --name "simple-dimple-xray-{{ xray_pool_code }}" \
+          --restart unless-stopped \
+          -p "{{ xray_port }}:{{ xray_port }}" \
+          -v "/etc/xray-{{ xray_pool_code }}/config.json:/etc/xray/config.json:ro" \
+          ghcr.io/xtls/xray-core:latest run -config /etc/xray/config.json
+      when: config_file.changed
+      register: container_start
+
+    - name: Ensure the container is running even if config was unchanged
+      # `docker start` on an already-running container is a silent no-op
+      # (exit 0, container name on stdout, no stderr) — always report
+      # changed_when: false here rather than trying to parse output for a
+      # "already running" message that docker start doesn't actually print
+      # (that phrasing only applies to `docker run`, not `start`).
+      ansible.builtin.command: docker start "simple-dimple-xray-{{ xray_pool_code }}"
+      when: not config_file.changed
+      changed_when: false
+
+    - name: Check whether this pool is already registered in the control-plane
+      ansible.builtin.uri:
+        url: "{{ xray_api_base }}/api/admin/endpoints"
+        method: GET
+        headers:
+          x-auth-session-id: "{{ xray_admin_session }}"
+        return_content: true
+        status_code: 200
+      register: existing_endpoints
+      delegate_to: localhost
+      become: false
+
+    - name: Register endpoint in the control-plane (first provisioning only)
+      when: (existing_endpoints.json.endpoints | selectattr('poolCode', 'equalto', xray_pool_code) | list | length) == 0
+      ansible.builtin.uri:
+        url: "{{ xray_api_base }}/api/admin/endpoints"
+        method: POST
+        headers:
+          Content-Type: application/json
+          x-auth-session-id: "{{ xray_admin_session }}"
+        body_format: json
+        body:
+          label: "{{ xray_label }}"
+          ipAddress: "{{ effective_ip_address }}"
+          provider: "{{ xray_provider }}"
+          asn: "{{ xray_asn | default(omit) }}"
+          countryCode: "{{ xray_country }}"
+          city: "{{ xray_city | default(omit) }}"
+          poolCode: "{{ xray_pool_code }}"
+          region: "{{ xray_region | default(omit) }}"
+          priority: "{{ xray_priority }}"
+          protocol: "{{ xray_protocol }}"
+          transportProfile: "{{ xray_transport_profile }}"
+          port: "{{ xray_port }}"
+          publicKey: "{{ xray_public_key }}"
+          shortId: "{{ xray_short_id }}"
+          sni: "{{ xray_sni }}"
+          fingerprint: "{{ xray_fingerprint }}"
+          flow: "{{ xray_flow }}"
+        status_code: 200, 201
+      delegate_to: localhost
+      become: false
+      register: registration_result
+
+    - name: Report result
+      ansible.builtin.debug:
+        msg: >-
+          Pool {{ xray_pool_code }} on {{ inventory_hostname }}:
+          {{ 'registered' if registration_result is changed else 'already registered, config ' + ('refreshed' if config_file.changed else 'unchanged') }}.

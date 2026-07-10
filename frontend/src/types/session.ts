@@ -3,7 +3,6 @@ import type {
   RoutePolicy,
   ServerOption,
 } from "./route";
-import type { TelemetryNetworkContext } from "./route";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 

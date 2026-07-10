@@ -97,20 +97,13 @@ export const defaultEndpointDetails = [
   }
 ] as const;
 
-// Значения соответствуют inbound из deploy/xray/dev-config.json — это единственный
-// endpoint с реальным (не RFC5737) IP и рабочим локальным Xray-процессом, остальные
+// de-fra-1 — единственный endpoint с реальным (не RFC5737) IP и рабочим
+// локальным Xray-процессом (deploy/xray/dev-config.json), остальные
 // endpoint-ы в этом файле остаются только vitrine-данными без живого транспорта.
-export const defaultEndpointTransportConfigs = [
-  {
-    endpointId: "de-fra-1",
-    port: 8443,
-    publicKey: "-9ABqsGJOl9OQEqG2KISZlHW3ePa2mHuCivT892kFh0",
-    shortId: "1840a5c9",
-    sni: "www.microsoft.com",
-    fingerprint: "chrome",
-    flow: "xtls-rprx-vision"
-  }
-] as const;
+// Транспортный ключ (publicKey/shortId) сюда не хардкодится: dev-config.json
+// генерируется локально через deploy/xray/generate-dev-config.sh (см. README
+// там же) и не коммитится, а его EndpointTransportConfig заводится в БД
+// через admin API — см. backend/src/store/endpoints.ts.
 
 const defaultInventoryHealth = summarizeInventoryHealth(
   defaultEndpointDetails.map((endpoint) => ({
@@ -144,7 +137,11 @@ export const defaultAccount: AccountSummary = {
     displayName: "Nikolaj",
     contact: "telegram @simpledimple",
     contactType: "telegram",
-    isAdmin: true,
+    // Fallback/demo account for unauthenticated contexts (see cloneDefaultAccount).
+    // Must stay non-admin: it's returned whenever there's no session, so an
+    // isAdmin:true here would grant admin to anyone hitting a route that only
+    // checks account.user.isAdmin without also checking auth.isAuthenticated.
+    isAdmin: false,
     status: "active",
     memberSince: "2026-06-15"
   },
@@ -173,9 +170,4 @@ export const defaultAuthSession: AuthSessionSummary = {
   isAuthenticated: false,
   lastAuthenticatedAt: null,
   expiresAt: null
-};
-
-export const defaultPasswordCredential = {
-  login: "demo",
-  password: "change-me"
 };

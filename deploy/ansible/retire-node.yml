@@ -1,0 +1,16 @@
+---
+# Ansible equivalent of `deploy/xray/provision-node.sh retire`. Only flips
+# isActive in the control-plane — same as the Ops "Retire" button — the Xray
+# container keeps running on the host.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini retire-node.yml --limit <host> \
+#     -e xray_endpoint_id=<endpoint-id>
+- name: Retire an Xray node in the control-plane
+  hosts: xray_nodes
+  become: true
+  gather_facts: false
+  vars:
+    xray_state: absent
+  roles:
+    - xray_node

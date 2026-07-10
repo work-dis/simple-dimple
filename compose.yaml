@@ -43,5 +43,59 @@ services:
       - ./deploy/xray/dev-config.json:/etc/xray/config.json:ro
     command: ["run", "-config", "/etc/xray/config.json"]
 
+  # profile "prod" — локальный smoke-test для backend.Dockerfile /
+  # frontend.Dockerfile (Шаг 4, PRIORITY_PLAN.md), НЕ повседневный dev-flow
+  # (для него по-прежнему `npm run dev`). Собран и прогнан вживую 2026-07-09
+  # (Decision 027, DECISIONS.md) — на чистом volume backend падал в
+  # crash-loop (P2021 TableDoesNotExist), потому что миграции не гонялись
+  # автоматически. `migrate` ниже закрывает этот пробел тем же способом, что
+  # уже используется в deploy/compose.prod.yaml (Decision 026).
+  #
+  #   docker compose --profile prod up --build
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: build
+    container_name: simple-dimple-migrate
+    profiles: ["prod"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://simpledimple:change-me@postgres:5432/simple_dimple
+    working_dir: /app
+    command: ["npx", "prisma", "migrate", "deploy", "--config", "backend/prisma.config.ts"]
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: simple-dimple-backend
+    profiles: ["prod"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://simpledimple:change-me@postgres:5432/simple_dimple
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: simple-dimple-frontend
+    profiles: ["prod"]
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "8081:80"
+
 volumes:
   postgres_data:

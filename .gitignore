@@ -2,6 +2,20 @@ node_modules
 dist
 .DS_Store
 npm-debug.log*
+.claude/settings.local.json
 backend/data
 backend/.env
 backend/src/generated
+deploy/.env
+deploy/ssh.env
+deploy/ansible/inventory.ini
+
+# Реальный REALITY-keypair — генерируется локально через
+# deploy/xray/generate-dev-config.sh, в git не попадает.
+deploy/xray/dev-config.json
+
+# libXray build: reproducible via `mobile/README.md` (git clone + gomobile
+# bind), not committed — the clone plus AAR is >100MB and machine-specific
+# (built against locally installed NDK/Go versions).
+mobile/native-libs
+mobile/android/app/libs/*.aar

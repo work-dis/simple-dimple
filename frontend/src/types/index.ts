@@ -37,6 +37,10 @@ export type {
   AdminUserSummary,
   AdminUsersResponse,
   UpdateAdminUserResponse,
+  AdminEndpointTransportSummary,
+  AdminEndpointSummary,
+  AdminEndpointsResponse,
+  SetAdminEndpointActiveResponse,
 } from "./admin";
 
 export type {

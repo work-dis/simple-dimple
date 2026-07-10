@@ -1,3 +1,5 @@
+import { Capacitor } from "@capacitor/core";
+
 export class HttpError extends Error {
   status: number;
 
@@ -5,6 +7,19 @@ export class HttpError extends Error {
     super(`Request failed with status ${status}`);
     this.status = status;
   }
+}
+
+// В браузере/PWA "/api/..." резолвится относительно текущего origin (dev —
+// через vite-proxy, prod — через nginx на одном хосте с бэкендом). В нативном
+// Capacitor-приложении WebView грузит бандл локально, у относительного пути
+// нет бэкенда за ним — нужен абсолютный control-plane URL.
+const nativeApiBaseUrl = "https://57.128.220.83";
+
+export function resolveApiUrl(path: string): string {
+  if (Capacitor.isNativePlatform() && path.startsWith("/")) {
+    return `${nativeApiBaseUrl}${path}`;
+  }
+  return path;
 }
 
 const authSessionStorageKey = "simple-dimple.auth-session-id";
@@ -44,7 +59,9 @@ export async function readJson<T>(
     headers.set("x-auth-session-id", authSessionId);
   }
 
-  const response = await fetch(input, {
+  const resolvedInput = typeof input === "string" ? resolveApiUrl(input) : input;
+
+  const response = await fetch(resolvedInput, {
     ...init,
     headers,
   });

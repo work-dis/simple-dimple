@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createAuthStore, authSessionTtlMs, maxVerificationAttempts } from "../auth.js";
+import { createAuthStore, authSessionTtlMs, maxVerificationAttempts, maxLoginAttempts } from "../auth.js";
 import { hashPassword, verifyPassword } from "../utils.js";
 import type { MessageTransport, MessageTransportInput, MessageTransportResult } from "../../transport/message-transport.js";
 
@@ -21,6 +21,7 @@ function createPrismaStub(capturedCreateData: { current: Record<string, unknown>
       findFirst: async () => null
     },
     verificationChallenge: {
+      findFirst: async () => null,
       updateMany: async () => ({ count: 0 }),
       create: async ({ data }: { data: Record<string, unknown> }) => {
         capturedCreateData.current = data;
@@ -123,6 +124,54 @@ describe("createAuthStore.requestAuthChallenge", () => {
       })
     ).rejects.toThrow("Failed to deliver verification code");
   });
+
+  it("rejects a new challenge for the same target within the cooldown window", async () => {
+    const capturedCreateData: { current: Record<string, unknown> | null } = { current: null };
+    const prisma = {
+      ...createPrismaStub(capturedCreateData),
+      verificationChallenge: {
+        ...createPrismaStub(capturedCreateData).verificationChallenge,
+        findFirst: async () => ({
+          id: "prev-challenge",
+          createdAt: new Date(Date.now() - 5_000)
+        })
+      }
+    };
+
+    const store = createAuthStore(prisma as never, noopTransport);
+
+    await expect(
+      store.requestAuthChallenge({
+        provider: "email",
+        target: "user@example.com"
+      })
+    ).rejects.toThrow("Too many requests");
+
+    expect(capturedCreateData.current).toBeNull();
+  });
+
+  it("allows a new challenge for the same target once the cooldown has elapsed", async () => {
+    const capturedCreateData: { current: Record<string, unknown> | null } = { current: null };
+    const prisma = {
+      ...createPrismaStub(capturedCreateData),
+      verificationChallenge: {
+        ...createPrismaStub(capturedCreateData).verificationChallenge,
+        findFirst: async () => ({
+          id: "prev-challenge",
+          createdAt: new Date(Date.now() - 120_000)
+        })
+      }
+    };
+
+    const store = createAuthStore(prisma as never, noopTransport);
+
+    const result = await store.requestAuthChallenge({
+      provider: "email",
+      target: "user@example.com"
+    });
+
+    expect(result.challengeId).toBeDefined();
+  });
 });
 
 describe("createAuthStore.loginWithPassword session expiry", () => {
@@ -168,6 +217,93 @@ describe("createAuthStore.loginWithPassword session expiry", () => {
     expect(expiresMs).toBeGreaterThan(before);
     expect(expiresMs).toBeLessThanOrEqual(before + authSessionTtlMs + 1000);
     expect(capturedSession.current?.expiresAt).toBeInstanceOf(Date);
+  });
+});
+
+describe("createAuthStore.loginWithPassword lockout", () => {
+  function credentialRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "cred-1",
+      userId: "user-1",
+      passwordHash: "irrelevant",
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      user: {
+        id: "user-1",
+        displayName: "Alice",
+        contact: "alice",
+        contactType: "telegram",
+        isAdmin: false,
+        status: "active",
+        memberSince: new Date(),
+        vlessUuid: null,
+        subscription: null,
+        devices: [],
+        passwordCredential: { login: "alice" }
+      },
+      ...overrides
+    };
+  }
+
+  it("rejects login while the account is locked out, even with the right password", async () => {
+    const passwordHash = await hashPassword("secret123");
+    const prisma = {
+      passwordCredential: {
+        findUnique: async () => credentialRow({ passwordHash, lockedUntil: new Date(Date.now() + 60_000) })
+      }
+    };
+
+    const store = createAuthStore(prisma as never, noopTransport);
+
+    await expect(
+      store.loginWithPassword({ login: "alice", password: "secret123" })
+    ).rejects.toThrow("Too many failed attempts");
+  });
+
+  it("locks the account out after too many wrong passwords", async () => {
+    const passwordHash = await hashPassword("secret123");
+    const captured: { current: Record<string, unknown> | null } = { current: null };
+    const prisma = {
+      passwordCredential: {
+        findUnique: async () => credentialRow({ passwordHash, failedLoginAttempts: maxLoginAttempts - 1 }),
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          captured.current = data;
+          return data;
+        }
+      }
+    };
+
+    const store = createAuthStore(prisma as never, noopTransport);
+
+    await expect(
+      store.loginWithPassword({ login: "alice", password: "wrong-password" })
+    ).rejects.toThrow("Too many failed attempts");
+
+    expect(captured.current?.lockedUntil).toBeInstanceOf(Date);
+    expect(captured.current?.failedLoginAttempts).toBe(0);
+  });
+
+  it("increments the failed-attempt counter without locking on a single wrong password", async () => {
+    const passwordHash = await hashPassword("secret123");
+    const captured: { current: Record<string, unknown> | null } = { current: null };
+    const prisma = {
+      passwordCredential: {
+        findUnique: async () => credentialRow({ passwordHash }),
+        update: async ({ data }: { data: Record<string, unknown> }) => {
+          captured.current = data;
+          return data;
+        }
+      }
+    };
+
+    const store = createAuthStore(prisma as never, noopTransport);
+
+    await expect(
+      store.loginWithPassword({ login: "alice", password: "wrong-password" })
+    ).rejects.toThrow("Invalid login or password");
+
+    expect(captured.current?.failedLoginAttempts).toBe(1);
+    expect(captured.current?.lockedUntil).toBeNull();
   });
 });
 

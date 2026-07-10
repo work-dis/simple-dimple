@@ -10,14 +10,31 @@
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  /* В упакованном (Capacitor) приложении нет браузерного chrome, который
+     обычно гасит resistance/bounce за нас — без этого потягивание экрана
+     пальцем выглядит как обычная веб-страница, а не нативный экран. */
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button {
   font: inherit;
+  /* Убирает 300ms задержку тапа и синий/серый tap-highlight у WebView —
+     то, из-за чего кнопки ощущаются как ссылки на сайте, а не как
+     нативные controls. */
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  transition: transform 0.12s ease, opacity 0.12s ease;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.96);
 }
 
 input {
@@ -29,6 +46,12 @@ input {
   display: grid;
   place-items: center;
   padding: 24px;
+  /* safe-area-inset — отступ под "чёлку"/home-indicator в нативной обвязке
+     (требует viewport-fit=cover в index.html); в браузере env() просто 0. */
+  padding-top: max(24px, env(safe-area-inset-top));
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
+  padding-left: max(24px, env(safe-area-inset-left));
+  padding-right: max(24px, env(safe-area-inset-right));
 }
 
 .card {
@@ -125,6 +148,11 @@ input {
   color: rgba(15, 23, 42, 0.6);
   font-weight: 500;
   font-size: 0.9rem;
+}
+
+.statusBadge {
+  display: inline-block;
+  cursor: default;
 }
 
 .ghostButton {
@@ -259,6 +287,20 @@ input {
 .serverButton.active {
   border-color: #0f172a;
   background: rgba(15, 23, 42, 0.08);
+}
+
+.serverButton span.serverBadge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: rgba(22, 163, 74, 0.14);
+  color: #166534;
+  vertical-align: middle;
 }
 
 .fullWidth {

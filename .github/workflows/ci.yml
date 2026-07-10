@@ -48,11 +48,170 @@ jobs:
       - name: Apply Prisma migrations
         run: npm run prisma:migrate --workspace backend
 
+      - name: Run lint
+        run: npm run lint
+
       - name: Run checks
         run: npm run ci:check
 
       - name: Run backend tests
         run: npm run test --workspace backend
 
+      - name: Run frontend tests
+        run: npm run test --workspace frontend
+
       - name: Build workspaces
         run: npm run ci:build
+
+  # Шаг 4 (docs/PRIORITY_PLAN.md) — реальный deploy поверх уже существующего
+  # CI. ОБА job'ы ниже написаны, но не запускались ни разу — в этом
+  # репозитории ещё нет ни одного из нужных secrets/environments. Пока они не
+  # заведены в GitHub (Settings -> Environments/Secrets), job безопасно падает
+  # на первом шаге, которому нужен секрет, и ничего не разворачивает. Список
+  # нужных secrets и порядок настройки — deploy/README.md.
+  deploy-staging:
+    name: Deploy to staging
+    needs: quality
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-backend:${{ github.sha }}
+            ghcr.io/${{ github.repository }}-backend:staging
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-frontend:${{ github.sha }}
+            ghcr.io/${{ github.repository }}-frontend:staging
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply migrations to staging database
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+        run: npm run prisma:migrate --workspace backend
+
+      - name: Deploy to staging host
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.STAGING_SSH_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            set -e
+            cd ${{ secrets.STAGING_DEPLOY_PATH }}
+            echo "BACKEND_IMAGE=ghcr.io/${{ github.repository }}-backend:${{ github.sha }}" > .env.deploy
+            echo "FRONTEND_IMAGE=ghcr.io/${{ github.repository }}-frontend:${{ github.sha }}" >> .env.deploy
+            cat .env.deploy .env > .env.runtime
+            docker compose -f deploy/compose.prod.yaml --env-file .env.runtime pull
+            docker compose -f deploy/compose.prod.yaml --env-file .env.runtime up -d
+
+  # Prod триггерится только тегом vX.Y.Z, а не каждым push в main — реальный
+  # gate (required reviewers) настраивается в GitHub Settings -> Environments
+  # -> prod, здесь его настроить нельзя.
+  deploy-prod:
+    name: Deploy to production
+    needs: quality
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: prod
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-backend:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}-backend:prod
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-frontend:${{ github.ref_name }}
+            ghcr.io/${{ github.repository }}-frontend:prod
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply migrations to production database
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: npm run prisma:migrate --workspace backend
+
+      - name: Deploy to production host
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_SSH_HOST }}
+          username: ${{ secrets.PROD_SSH_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            set -e
+            cd ${{ secrets.PROD_DEPLOY_PATH }}
+            echo "BACKEND_IMAGE=ghcr.io/${{ github.repository }}-backend:${{ github.ref_name }}" > .env.deploy
+            echo "FRONTEND_IMAGE=ghcr.io/${{ github.repository }}-frontend:${{ github.ref_name }}" >> .env.deploy
+            cat .env.deploy .env > .env.runtime
+            docker compose -f deploy/compose.prod.yaml --env-file .env.runtime pull
+            docker compose -f deploy/compose.prod.yaml --env-file .env.runtime up -d

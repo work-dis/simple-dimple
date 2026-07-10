@@ -22,7 +22,7 @@ describe("inventory policy", () => {
     expect(getInventoryPolicyViolation(health)).toBeNull();
   });
 
-  it("reports a policy violation when active inventory does not span three provider/ASN/region domains", () => {
+  it("treats two independent provider/ASN/region domains as compliant", () => {
     const health = summarizeInventoryHealth([
       {
         endpointId: "ep-1",
@@ -42,8 +42,25 @@ describe("inventory policy", () => {
       }
     ]);
 
-    expect(health.riskLevel).toBe("watch");
-    expect(health.failedDimensions).toEqual(["active endpoints 2/3", "providers 2/3", "ASNs 2/3", "regions 2/3"]);
-    expect(getInventoryPolicyViolation(health)).toContain("at least 3 independent failure domains");
+    expect(health.riskLevel).toBe("ok");
+    expect(health.failedDimensions).toEqual([]);
+    expect(getInventoryPolicyViolation(health)).toBeNull();
+  });
+
+  it("reports a policy violation when active inventory does not span two provider/ASN/region domains", () => {
+    const health = summarizeInventoryHealth([
+      {
+        endpointId: "ep-1",
+        provider: "Provider A",
+        asn: 64500,
+        poolCode: "fra-a",
+        countryCode: "DE",
+        region: "Germany"
+      }
+    ]);
+
+    expect(health.riskLevel).toBe("critical");
+    expect(health.failedDimensions).toEqual(["active endpoints 1/2", "providers 1/2", "ASNs 1/2", "regions 1/2"]);
+    expect(getInventoryPolicyViolation(health)).toContain("at least 2 independent failure domains");
   });
 });

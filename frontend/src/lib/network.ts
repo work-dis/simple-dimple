@@ -40,29 +40,34 @@ export function buildRouteContext(): TelemetryNetworkContext {
 }
 
 export async function submitProbeReport(server: ServerOption) {
+  const { getStoredAuthSessionId, resolveApiUrl } = await import("./http");
+  const { enqueueTelemetryReport } = await import("./telemetryQueue");
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const sessionId = getStoredAuthSessionId();
+  if (sessionId) {
+    headers["x-auth-session-id"] = sessionId;
+  }
+  const url = resolveApiUrl("/api/telemetry/probe");
+  const body = JSON.stringify({
+    endpointId: server.id,
+    transportProfile: server.transportProfile,
+    result: "connected",
+    latencyMs: server.latencyMs,
+    bytesSent: 512,
+    bytesReceived: 2048,
+    appVersion: "pwa-dev",
+    testedAt: new Date().toISOString(),
+    networkType: readNetworkType(),
+  });
+
   try {
-    const { getStoredAuthSessionId } = await import("./http");
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const sessionId = getStoredAuthSessionId();
-    if (sessionId) {
-      headers["x-auth-session-id"] = sessionId;
+    const response = await fetch(url, { method: "POST", headers, body });
+    if (!response.ok) {
+      enqueueTelemetryReport(url, body, headers);
     }
-    await fetch("/api/telemetry/probe", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        endpointId: server.id,
-        transportProfile: server.transportProfile,
-        result: "connected",
-        latencyMs: server.latencyMs,
-        bytesSent: 512,
-        bytesReceived: 2048,
-        appVersion: "pwa-dev",
-        testedAt: new Date().toISOString(),
-        networkType: readNetworkType(),
-      }),
-    });
   } catch {
-    // Best-effort telemetry
+    // Отправка не удалась (offline/сетевой сбой) — кэшируем локально и
+    // досылаем при следующем flushTelemetryQueue(), а не теряем отчёт.
+    enqueueTelemetryReport(url, body, headers);
   }
 }

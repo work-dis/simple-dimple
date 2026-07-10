@@ -324,7 +324,7 @@
 - следующий auth-шаг уже не “нужен ли auth вообще”, а “как добавляем `email verification` и `Telegram auth` поверх текущего credentials-flow”
 - dev-стенд теперь проверяет не только `account` API, но и auth endpoints
 
-|## Decision 015
+## Decision 015
 
 Дата: `2026-07-06`
 
@@ -701,6 +701,1790 @@
   `deploy/xray/dev-config.json`).** Оба явно помечены как non-production в своих
   файлах/README; для прода README уже требует сгенерировать новый keypair и
   секреты. Это dev-контур, не меняем.
+
+## Decision 023
+
+Дата: `2026-07-09`
+
+Тема: `PRIORITY_PLAN.md` расширен четырьмя новыми шагами между "реальный
+транспорт" и "alerting" — устойчивость подключения и infra-автоматизация
+
+Решение:
+
+- после Шага 2 (реальный VLESS+REALITY транспорт) в
+  [PRIORITY_PLAN.md](PRIORITY_PLAN.md) добавлены:
+  - Шаг 3 — client-side auto-fallback по уже существующему `routePolicy.shortlist`
+    вместо ручного похода на `Server` при неудачном подключении
+  - Шаг 4 — CI/CD: контейнеризация backend/frontend/worker и реальный deploy
+    job поверх уже существующего CI (сейчас CI только проверяет, никуда не
+    катит)
+  - Шаг 5 — fleet provisioning: подъём/retire Xray-ноды без ручной правки
+    `defaults.ts` и без деплоя backend
+  - Шаг 6 — устойчивость к блокировке на уровне оператора: SNI/fingerprint
+    diversity и bridge-модель распространения inventory
+- старый "Шаг 3 — alerting" стал "Шаг 7" и по-прежнему ждёт закрытия всего,
+  что перед ним
+- Шаг 1 (OTP-утечка) отмечен как сделанный со ссылкой на
+  [[Decision 020]] и [[Decision 022]]
+
+Почему:
+
+- Шаги 3-6 логически продолжают именно Шаг 2, а не общий roadmap: смысла в
+  реальном Xray-туннеле мало, если клиент не умеет сам переключаться на
+  следующего кандидата при провале (Шаг 3), нечем катить новые ноды на
+  прод без деплой-пайплайна (Шаг 4), некому автоматически провижинить
+  замену сожжённой ноды (Шаг 5), и весь парк из 2-3 нод слишком легко
+  вычислить и заблокировать целиком без diversity/bridge-модели (Шаг 6)
+- alerting-слой (уже отложенный в Шаге 3/теперь 7) развит сильнее ядра
+  продукта — продолжать откладывать его до того, как подключение станет
+  реально устойчивым и воспроизводимо деплоится, соответствует уже принятой
+  логике `PRIORITY_PLAN.md`
+- часть механизмов из этих шагов уже частично существует (health-check
+  worker уже гасит `isActive` после 3 неудачных TCP-проверок,
+  `route-policy.ts` уже строит diversified shortlist) — новые шаги не
+  изобретают их заново, а достраивают недостающую часть (execution на
+  клиенте, provisioning, deploy)
+
+Последствия:
+
+- следующая содержательная работа после закрытия Шага 2 идёт по Шагам 3-6
+  по порядку, не перепрыгивая вперёд к alerting
+- Шаг 6 меняет модель доступа к `GET /api/session`/`servers` (не весь
+  inventory всем клиентам) — при реализации потребует отдельного Decision,
+  затрагивающего [[Decision 022]]
+- `frontend/src/hooks/useRouteSession.ts` и `backend/src/defaults.ts`
+  становятся следующими точками содержательных изменений, а не
+  `ops-alert-delivery.ts`
+
+## Decision 024
+
+Дата: `2026-07-09`
+
+Тема: bridge-модель для Шага 6 — как именно клиент получает подмножество
+inventory вместо всего парка
+
+Решение:
+
+- клиент видит не весь активный inventory, а детерминированный сегмент,
+  выбранный по `sha256(userId:rotationBucket:endpointId)` — для одного
+  пользователя в пределах одного rotation-периода сегмент стабилен
+  (не скачет между вызовами `GET /api/session`/`/api/routes/resolve` за
+  один и тот же час), для разных пользователей — независим;
+- rotation-период по умолчанию 24 часа (`rotationPeriodMs` в
+  [backend/src/inventory-segmentation.ts](../backend/src/inventory-segmentation.ts));
+  после смены bucket сегмент пересчитывается заново тем же детерминированным
+  способом, а не хранится в БД — не нужна отдельная таблица/миграция;
+- сегмент обязан сам по себе быть policy-совместимым — тем же
+  `summarizeInventoryHealth`/`getInventoryPolicyViolation` из
+  [inventory-policy.ts](../backend/src/inventory-policy.ts), которые уже
+  применяются к полному inventory в `listServers()`. Набираем кандидатов по
+  порядку хэша, пока не наберём `minSegmentSize` (по умолчанию 4) И policy не
+  перестанет быть нарушена;
+- если парк маленький (`<= passthroughThreshold`, по умолчанию 6 нод) —
+  сегментация не применяется вообще, отдаём всё. Без этого dev-парк из 1-2
+  нод (текущее состояние) вообще не проходил бы сегментацию, что
+  сделало бы фичу непроверяемой на существующих данных;
+- если для большого парка не удаётся набрать policy-совместимое
+  подмножество меньше полного (вырожденный случай — почти все ноды у одного
+  provider/ASN) — отдаём полный inventory, а не urезанный
+  policy-нарушающий список. Fail-open к доступности, а не к урезанию —
+  тот же принцип, что `listServers()` уже применяет фейл-клоуз на чтение
+  (см. [[Decision 022]] и `inventory-policy.ts`), только зеркально: там
+  где нельзя гарантировать безопасность урезания, не урезаем.
+
+Что сделано: сам алгоритм выбора сегмента (`selectClientSegment()`)
+написан как чистая функция и покрыт unit-тестами (детерминизм, ротация,
+разные пользователи — разные сегменты, passthrough для маленького парка,
+fallback на полный список для вырожденного случая).
+
+### Обновление (2026-07-09, тем же днём): continuity решена через pinning, сегментация подключена к маршрутам
+
+Изначально continuity-вопрос (что делать с `currentAssignment`, выпавшим из
+сегмента после ротации) был открытым — предполагалось либо объединение
+сегмента с текущим assignment'ом, либо отдельная логика "не ротировать, пока
+есть активное подключение". По факту реализации выбран более простой и
+полностью stateless вариант — **только pinning**, без отдельной логики
+задержки ротации:
+
+- `selectClientSegment()` получил параметр `pinnedEndpointIds` — любой
+  endpointId из этого списка, реально существующий в inventory,
+  принудительно входит в сегмент, независимо от hash-ранга;
+- `runtime.ts::resolveRouteDecision()` собирает pin-список из трёх
+  источников: `persistedAssignment.endpointId` (текущее подключение),
+  `lastKnownGoodRoute.endpointId` (последний рабочий маршрут для этой сети)
+  и `manualEndpointId` из тела запроса (`/api/routes/resolve`) — тем самым
+  закрывает и continuity-вопрос, и `manualEndpointId`-вопрос одним и тем же
+  механизмом: **если что-то раньше было валидным endpoint'ом для этого
+  пользователя (по подключению, истории или явному запросу) — оно остаётся
+  видимым**, даже если сегментация по хэшу его не выбрала бы;
+- отдельная логика "не ротировать сегмент, пока есть подключение" оказалась
+  не нужна — pinning решает ту же проблему проще и без дополнительного
+  состояния (не нужно знать, "активно" ли подключение, чтобы решить,
+  ротировать сегмент или нет);
+- `session.ts::listServers()` принимает необязательный `segmentation:
+  ServerSegmentationContext` (`{ subjectId, pinnedEndpointIds }`) и применяет
+  `selectClientSegment()` **после** fail-closed policy-проверки на полном
+  inventory (см. `inventory-policy.ts`) — доступность системы по-прежнему
+  оценивается по всему парку, сегментация только сужает то, что видит
+  конкретный клиент;
+- сегментация применяется только если у сессии есть `auth.userId` — для
+  анонимных/неаутентифицированных вызовов (которых по [[Decision 022]] на
+  data-plane быть не должно, но типы это допускают) сегментация не
+  применяется, отдаётся полный список, fail-open.
+
+Проверено: `npm run typecheck --workspace backend`,
+`npm run test --workspace backend` (183/184, тот же pre-existing flaky тест
+на time-of-day, не связан с этими изменениями) — зелёные, включая
+существующие `session.test.ts`/`route-policy.test.ts` без изменений в самих
+тестах. **Не проверено** — реальное поведение против живой Postgres/большого
+(>6 нод) парка: в dev-среде, где это писалось, нет БД и текущий
+`defaults.ts` даёт только 1-2 endpoint'а, что ниже `passthroughThreshold` —
+сегментация физически не активируется на существующих dev-данных, только на
+синтетических данных в unit-тестах.
+
+Последствия:
+
+- Definition of done Шага 6 формально выполнено: SNI/fingerprint diversity
+  закрыт через `provision-node.sh`, bridge-модель подключена к
+  `GET /api/session`/`/api/routes/resolve` — компрометация одного аккаунта
+  больше не раскрывает весь inventory, если парк вырастет выше
+  `passthroughThreshold` (6 нод);
+- защита неактивна, пока в проде меньше 7 активных endpoint'ов — это
+  сознательный выбор (см. выше), а не недосмотр: нет смысла "сегментировать"
+  парк из 2-3 нод;
+- протокольная diversity (Trojan/Shadowsocks-2022 fallback) по-прежнему вне
+  этого решения — отдельная очередь в [ROADMAP.md, Этап 6](ROADMAP.md).
+
+## Decision 025
+
+Дата: `2026-07-09`
+
+Тема: Шаг 2a (реальный VLESS+REALITY транспорт) подтверждён живой проверкой;
+как закрыт пробел "один client id на ноду"; что сознательно оставлено как
+временный компромисс
+
+Решение:
+
+- **Реальный туннель подтверждён вручную end-to-end**, не только юнит-тестами
+  построения конфига. На боевом VPS (`57.128.220.83`, тот же хост, что
+  backend/frontend) через `deploy/xray/provision-node.sh register` поднят
+  настоящий `xray-core` inbound (VLESS+REALITY+TCP). Backend через
+  `POST /api/routes/resolve` выдал реальный `connectionConfig` тестовому
+  пользователю; локальный `xray-core` клиент с этим конфигом поднял
+  SOCKS5-туннель, и `curl` через него вернул IP VPS, а не клиента —
+  первый момент в проекте, когда "VPN" в коде реально означает VPN;
+- по пути найден и исправлен независимый баг в самой тестовой обвязке:
+  клиентский `xray-core` inbound слушал `127.0.0.1` внутри контейнера —
+  Docker port-forward до такого адреса не достаёт, нужен `0.0.0.0`. Это
+  ошибка тестовой инфраструктуры, не продукта, зафиксирована здесь только
+  потому, что заняла время диагностики (ложно выглядела как проблема REALITY
+  handshake);
+- **закрыт пробел "per-user client id"**, отмеченный в Шаге 5 как явно
+  вынесенный в Шаг 2: `provision-node.sh` провижинит inbound с одним
+  сгенерированным client id, а `connection-config.ts` выдаёт каждому
+  пользователю персональный `vlessUuid` — раньше эти два id никогда не
+  совпадали, реально подключиться мог только тот, кому id прописали руками.
+  Решение — первый из двух вариантов, названных в `PRIORITY_PLAN.md`
+  ("периодический re-render конфига + reload", а не gRPC `HandlerService`):
+  - новый admin-эндпоинт `GET /api/admin/vless-clients`
+    ([backend/src/server.ts](../backend/src/server.ts),
+    [backend/src/store/endpoints.ts](../backend/src/store/endpoints.ts)
+    `listVlessClients()`) — отдаёт `{ uuid, flow }` для всех пользователей
+    с непустым `vlessUuid`, за тем же `requireAdminAuthSession`, что и
+    остальной fleet-inventory;
+  - [deploy/xray/sync-clients.sh](../deploy/xray/sync-clients.sh) — бежит
+    на самой Xray-ноде (по cron, сейчас раз в 5 минут для `fr-test-1`),
+    сравнивает текущий `inbound.settings.clients` с ответом API, и только
+    если список реально изменился — перезаписывает конфиг и рестартует
+    контейнер (no-op при отсутствии изменений, чтобы не дёргать ноду
+    попусту каждые 5 минут);
+  - проверено вживую: второй тестовый пользователь получил свой `vlessUuid`
+    через API, `sync-clients.sh` подхватил изменение, дописал второго
+    клиента и перезапустил ноду — первый уже подключённый клиент
+    переподключился и продолжил получать реальный IP VPS через тот же
+    туннель после рестарта;
+- по пути поймали и починили права на файл: `mktemp` под `sudo` создаёт файл
+  с правами `600 root`, а `ghcr.io/xtls/xray-core` бежит под non-root UID
+  `65532` — после `mv` конфиг становился нечитаемым для контейнера (`Failed
+  to start: ... permission denied`). Фикс — `chmod 644` перед `mv` в
+  `sync-clients.sh`;
+- **сознательно НЕ выбрана** gRPC `HandlerService`-альтернатива (добавление
+  клиента без даунтайма) — `sync-clients.sh` перезапускает контейнер, роняя
+  активные соединения на этой ноде на секунду-две при каждом изменении
+  списка. Для одной dev/staging ноды это приемлемо; если/когда реальный
+  multi-user трафик на живой ноде станет плотным, такой способ дёргать всех
+  пользователей на каждый новый signup — не годится, нужно будет перейти на
+  `HandlerService`. Явный TODO, не сделано в рамках этой проверки.
+
+Что сделано для честности инвентаря после проверки:
+
+- для прохождения `inventory-policy.ts` (минимум 3 независимых failure
+  domain) пришлось зарегистрировать 3 Xray-инбаунда на **одном и том же**
+  VPS (разные порты, разные fake provider/ASN/region в БД) — это не три
+  реально независимых узла, а тестовый стенд. Retire двух из них через
+  `PATCH /api/admin/endpoints/:id` **заблокирован самой policy** (fail-closed
+  guard `evaluateEndpointRetirement()`, [[Decision 022]]-совместимое
+  поведение) — уронить inventory ниже минимума, чтобы "прибраться", было бы
+  обходом того самого инварианта, который эта проверка должна была
+  подтвердить, а не отключением его. Вместо retire — переименовали все три
+  ноды (`label` дополнен суффиксом `[TEST: co-located on single VPS, not
+  real provider diversity]`), чтобы никто не принял их за настоящую
+  provider/ASN-диверсификацию;
+- тестовый admin-аккаунт (`xray-e2e-test@example.com`), созданный для этой
+  проверки, понижен до обычного пользователя (`isAdmin=false`) сразу после
+  использования;
+- для cron-задачи `sync-clients.sh` заведён отдельный сервисный аккаунт
+  (`xray-fleet-automation@simple-dimple.local`, admin) — не переиспользуем
+  учётку тестового пользователя, чей admin-статус может измениться
+  независимо от жизненного цикла автоматизации. Ограничение: это обычная
+  `AuthSession` с тем же сроком жизни, что у пользовательских сессий (~30
+  дней), а не отдельный неистекающий service-token — в модели авторизации
+  проекта такого понятия сейчас нет. TODO на будущее, если понадобится
+  больше сервисных интеграций;
+- debug-логи (`loglevel: debug`, REALITY `show: true`), включённые на время
+  диагностики handshake, возвращены в `warning`/`false`.
+
+Последствия:
+
+- Definition of done Шага 2a формально выполнено: живой VLESS+REALITY
+  inbound есть, backend выдаёт рабочий connection-config, вручную
+  подтверждено, что подключение реально меняет исходящий IP;
+- inventory сейчас technically policy-compliant (3 endpoint'а), но все три —
+  один физический хост; это не настоящая failure-domain диверсификация, и
+  проект должен явно считать себя без реального geo/provider-резервирования
+  до тех пор, пока не появится минимум 2-3 отдельных VPS у разных
+  провайдеров (см. обновлённый статус Шага 2 в
+  [PRIORITY_PLAN.md](PRIORITY_PLAN.md));
+- per-user client-id sync работает, но ценой рестарта ноды на каждое
+  изменение состава пользователей — не проблема сейчас, станет проблемой при
+  росте, отслеживается как открытый TODO, а не забыто.
+
+## Decision 026
+
+Дата: `2026-07-09`
+
+Тема: Шаг 5 (fleet provisioning) — retire-аудит (manual vs auto-detected) и
+два независимых бага, найденных по пути
+
+Решение:
+
+- **Endpoint получил `retiredAt`/`retiredReason`** (миграция
+  `20260709150000_endpoint_retire_audit`). До этого `isActive=false` не
+  говорил, **почему** нода вне ротации — вручную вывел админ или
+  healthcheck-воркер сам погасил после 3 неудачных пингов подряд
+  (`store/endpoint-healthcheck.ts`, `deactivateAfterConsecutiveFailures`).
+  Ops теперь показывает причину и время (`retired: manual · <дата>` или
+  `auto-retired by health-check`) на карточке ноды;
+- **manual retire теперь "залипает"**: раньше здоровый пинг от
+  healthcheck-воркера безусловно ставил `isActive: true` — то есть нода,
+  которую администратор явно вывел из ротации через Ops, могла сама
+  вернуться в строй за его спиной, если ответила хотя бы на один пинг.
+  Теперь `applyHealthCheckResult()` проверяет `retiredReason === "manual"`
+  и в этом случае только обновляет метрики (`lastHealthCheckOk` и т.п.), не
+  трогая `isActive`/`retiredAt`/`retiredReason` — реактивация только через
+  явное действие в Ops;
+- **auto-детект помечается отдельно** (`retiredReason: "auto_health_failure"`)
+  и, в отличие от manual, по-прежнему само реактивируется при следующем
+  успешном пинге (тот же soft-recovery, что был всегда) — разница в том,
+  что теперь видно, что это было временное, а не осознанное решение;
+- `PATCH /api/admin/endpoints/:id` принимает необязательный `retiredReason`
+  (строка) — по умолчанию `"manual"`, если не передан. UI (кнопка "Retire" в
+  Ops) не получил текстовое поле для причины — осталось одно действие в один
+  клик, как и было в Definition of done Шага 5; кастомный текст доступен
+  только через прямой вызов API.
+
+Два независимых бага, найденных при живой проверке в браузере (не
+юнит-тестами — Ops-экран целиком падал с `500`, что заставило разбираться):
+
+- **`store/ops-alerts.ts`**: несколько методов (`list`, `resendDelivery`)
+  вызывали друг друга через `this.xxx(...)` внутри общего `return { ... }`.
+  `state-store.ts` (Decision 017: разделение по доменам) торвёт методы
+  поодиночке — `listOpsAlerts: opsAlerts.list` — и при вызове
+  `store.listOpsAlerts(...)` внутри `list()` `this` указывает на
+  `state-store`, а не на `opsAlerts`, где метод `refreshFromOpsSummary`
+  реально лежит. Итог: `GET /api/ops/alerts` падал с `500 TypeError:
+  this.refreshFromOpsSummary is not a function` при **любом** обращении к
+  Ops-экрану, если бы кто-то до сих пор не заметил (эндпоинт не был
+  покрыт integration-тестом, вызывающим его через `state-store`, только
+  юнит-тестами самого `ops-alerts.ts`, где `this` резолвится правильно).
+  Фикс — `const store = { ... }; return store;` вместо `return { ... }`, и
+  оба внутренних вызова через `store.xxx(...)` вместо `this.xxx(...)`;
+- **`deploy/manual-deploy.sh`**: одноразовый сервис `migrate` (profile
+  `tools`) вызывался через `docker compose run --rm migrate` без `--build`.
+  `run` (в отличие от `up --build`, которым поднимаются backend/frontend
+  чуть ниже в том же скрипте) не пересобирает образ сам — значит `migrate`
+  работал на старом закешированном `simple-dimple-backend-build` образе и
+  молча не видел новые миграции, скопированные тем же прогоном `rsync`.
+  Поймали это только потому, что `retiredAt`/`retiredReason` из этого же
+  решения физически не появились в проде после первого деплоя. Фикс —
+  добавлен явный `docker compose ... build migrate` перед `run --rm
+  migrate` в `manual-deploy.sh`.
+
+Последствия:
+
+- Definition of done Шага 5 закрыт: новая нода добавляется без правки
+  `defaults.ts`/редеплоя (`provision-node.sh`, подтверждено в Decision 025),
+  админ выводит ноду из ротации за одно действие в Ops (было и раньше), и
+  теперь видно **почему** каждая неактивная нода неактивна — это и был
+  единственный оставшийся explicit-пункт "Что делать" в Шаге 5;
+  `inventory-policy.ts` (≥3 failure domains) продолжает соблюдаться после
+  каждого retire — проверка не менялась;
+- `deploy/manual-deploy.sh` теперь безопасен для будущих миграций схемы —
+  до этого фикса каждый деплой со схемной миграцией без ручного
+  `docker compose ... build migrate` тихо не применял бы её;
+- `ops-alerts.ts`-баг был давно существующим (независим от этой сессии), но
+  обнаружен и исправлен только потому, что Ops-экран впервые открыли в
+  реальном браузере против реального backend, а не только гоняли unit-тесты
+  — лишнее подтверждение, зачем нужна ручная browser-проверка UI-изменений,
+  а не только `tsc`/`vitest`.
+
+## Decision 027
+
+Дата: `2026-07-09`
+
+Тема: Шаг 4 — корневой `compose.yaml` profile `prod` не эквивалентен
+настоящему deploy path; нужен явный шаг миграций и в нём тоже
+
+Решение:
+
+- при первом живом `docker compose --profile prod build/up` в этой
+  среде (Docker оказался доступен, вопреки более ранней заметке в
+  [PRIORITY_PLAN.md](PRIORITY_PLAN.md)) backend на чистом
+  `postgres_data` volume падает в crash-loop: `P2021 TableDoesNotExist`.
+  Причина — у корневого `compose.yaml` (profile `prod`, задуман как
+  локальный smoke-test для `backend/Dockerfile`/`frontend/Dockerfile`) нет
+  шага миграций, в отличие от [deploy/compose.prod.yaml](../deploy/compose.prod.yaml),
+  где уже есть одноразовый сервис `migrate` (см. Decision 026, где для
+  него же чинили `--build`);
+- считаем это подтверждённым, а не гипотетическим пробелом: до этого
+  прогона в `PRIORITY_PLAN.md` было предположение "нужен явный шаг `prisma
+  migrate deploy`", теперь это воспроизведённый краш при первом же деплое
+  на пустую БД;
+- отдельно поймали ловушку при диагностике: на этой машине на
+  `localhost:5432` уже слушает нативный (не Docker) Postgres-процесс.
+  Прогон `prisma migrate deploy` с хоста на `localhost:5432` тихо
+  подключился к нему вместо контейнера и вернул "No pending migrations to
+  apply", хотя контейнерная БД оставалась пустой — команда с хоста может
+  соврать об успехе, если на хосте параллельно поднят dev-Postgres на том
+  же порту. Миграции нужно гонять либо изнутри docker-сети (как это делает
+  `migrate` в `deploy/compose.prod.yaml`), либо явно указывая порт
+  контейнера, а не полагаться на `localhost:5432` с хоста;
+- `deploy/compose.prod.yaml` + `deploy/manual-deploy.sh` (реальный deploy
+  path на VPS) уже прогоняют `migrate` перед `up` — этот путь пробелом не
+  затронут, если запускать именно его, а не корневой `compose.yaml`
+  вручную;
+- **пробел закрыт в тот же день**: в корневой `compose.yaml` добавлен
+  сервис `migrate` (тот же паттерн, что в `deploy/compose.prod.yaml`,
+  `target: build` у `backend/Dockerfile`, `npx prisma migrate deploy`),
+  `backend` теперь зависит от него через `depends_on: migrate: condition:
+  service_completed_successfully`. Проверено вживую на чистом
+  `postgres_data` volume: `docker compose --profile prod up --build`
+  сам ждёт `migrate → Exited (0)` и только потом стартует `backend`, без
+  ручного вмешательства — `GET /api/session` → `401` (корректно), `GET /`
+  на frontend → `200`.
+
+Последствия:
+
+- корневой `compose.yaml` profile `prod` теперь эквивалентен настоящему
+  deploy path (`deploy/compose.prod.yaml`) по шагу миграций — оба гоняют
+  `migrate` перед стартом backend, локальный smoke-test больше не даёт
+  ложного краша и не расходится с реальным деплоем;
+- `PRIORITY_PLAN.md`, Шаг 4 — статус образов и миграций закрыт: `build` +
+  `up --build` реально проверены на чистой БД end-to-end. Деплой-jobs
+  `ci.yml` (`deploy-staging`/`deploy-prod`) и реальный прогон
+  `deploy/manual-deploy.sh` на VPS по-прежнему не проверены — нет
+  secrets/environment и доступа к реальному серверу в этой среде, это
+  осталось вне скоупа.
+
+## Decision 028
+
+Дата: `2026-07-09`
+
+Тема: Шаг 2b — впервые собран Android-тулинг в этой среде, `VpnTunnelPlugin.kt`
+реально скомпилирован и собран debug APK
+
+Решение:
+
+- Android SDK/Gradle тулинг, который [mobile/README.md](../mobile/README.md)
+  раньше называл отсутствующим в среде, установлен через Homebrew:
+  `gradle` (cask-независимый, обычный formula), `android-commandlinetools`
+  (cask, `sdkmanager`/`adb`/`avdmanager`), `platform-tools`,
+  `platforms;android-34`/`platforms;android-35`, `build-tools;35.0.0`,
+  `openjdk@17` и `openjdk@21` (keg-only, не подменяют системный `java` —
+  подключаются через явный `JAVA_HOME` только для Android-сборки);
+- `cd mobile && npm install && npx cap add android` — впервые сгенерирован
+  реальный Gradle-проект `mobile/android/` (раньше не существовал, см.
+  `mobile/README.md`, п.1 "Что здесь специально не сделано");
+- `android-skeleton/VpnTunnelPlugin.kt` скопирован в
+  `android/app/src/main/java/com/simpledimple/app/VpnTunnelPlugin.kt` —
+  первая реальная проверка Capacitor Android bridge API
+  (`Plugin`/`PluginCall`/`JSObject`/`startActivityForResult`/`@ActivityCallback`),
+  использованных в черновике "по памяти", без компилятора. Плагин
+  зарегистрирован в `MainActivity.java` через `registerPlugin(VpnTunnelPlugin.class)`
+  — этого не было в черновике, без регистрации Capacitor не нашёл бы плагин
+  по имени `"VpnTunnel"` в рантайме;
+- Gradle-конфиг проекта, сгенерированный `cap add android`, не был готов к
+  Kotlin из коробки — понадобилось добавить `org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24`
+  в `android/build.gradle` (classpath) и `apply plugin:
+  'org.jetbrains.kotlin.android'` + `kotlin-stdlib` в `android/app/build.gradle`;
+- `compileSdk 35` (из `variables.gradle`) требовал `platforms;android-35`
+  отдельно от `android-34`, который был поставлен первым;
+- **три JDK перебраны, прежде чем сборка прошла**: `openjdk@17` (первый
+  установленный, стандартный для многих Gradle-проектов) — не хватило,
+  `capacitor-android:compileDebugJavaWithJavac` требовал `--release 21`;
+  системный `openjdk` (26.0.1, уже был в кэше Homebrew) — оказался
+  **слишком новым**: `jlink`/`androidJdkImage`-трансформация Android
+  Gradle Plugin 8.7.2 не работает на JDK 26 (`Error while executing
+  process ... jlink ...`); `openjdk@21` — единственный вариант, на котором
+  реально собралось. Это конкретное ограничение текущей версии AGP, не
+  общее правило "новее — лучше" для Java;
+- `./gradlew :app:assembleDebug` (в docker-сети не гонялось — чисто
+  локальный Gradle-daemon) — **`BUILD SUCCESSFUL`**, `VpnTunnelPlugin.kt`
+  прошёл `compileDebugKotlin` без ошибок (одно предупреждение — неиспользуемый
+  параметр в заглушке `startTunnel()`, ожидаемо для черновика с `TODO`
+  внутри), итоговый `app-debug.apk` (~4.16MB) реально существует на диске.
+
+Последствия:
+
+- Definition of done Шага 2 частично продвинут: "черновой APK, который
+  реально поднимает VPN-туннель" всё ещё не достигнут — `startTunnel()`/
+  `SimpleDimpleVpnService` остаются `TODO` (нет выбранной mobile-библиотеки
+  Xray core, см. `mobile/README.md`), но "код без сборки" для Kotlin-стороны
+  плагина закрыт: код реально компилируется, а не только написан по памяти;
+- следующий шаг из очереди `mobile/README.md` — подключить mobile-сборку
+  Xray core (`.so` через JNI либо готовый AAR) и реализовать
+  `startTunnel()`/`SimpleDimpleVpnService` поверх него; после этого —
+  проверка на реальном устройстве/эмуляторе (эмулятор — `avdmanager`, уже
+  доступен через тот же `android-commandlinetools`, но AVD ещё не создан);
+- локальная среда теперь физически может собирать Android-проект — этот
+  пробел в `PRIORITY_PLAN.md`/`mobile/README.md` ("нет Android SDK/Gradle
+  в dev-среде") больше не актуален для машины, где это делалось; актуальность
+  на других машинах/CI не проверялась.
+
+## Decision 029
+
+Дата: `2026-07-09`
+
+Тема: Шаг 2b — `startTunnel()`/`SimpleDimpleVpnService` реализованы поверх
+`XTLS/libXray`, APK собирается с реально влинкованным Xray-core
+
+Решение:
+
+- **выбрана mobile-библиотека Xray core**: `XTLS/libXray` (официальный
+  wrapper от той же организации, что публикует протокол REALITY и сам
+  Xray-core), собирается в Android `.aar` через `gomobile bind`. Альтернатива
+  (сборка `xray-core` напрямую через `gomobile bind` без обёртки) отклонена —
+  `libXray` уже даёт готовый JSON-based API (`setTunFd`/`runXrayFromJSON`/
+  `stopXray`) и поддерживается тем же апстримом;
+- **архитектура упрощена относительно первоначального плана**: изначально
+  предполагался отдельный tun2socks-мост (`hev-socks5-tunnel`, как в
+  v2rayNG) между `VpnService`-TUN и SOCKS5 inbound Xray-core. Проверка
+  исходников `Xray-core` (`proxy/tun`) показала, что у Xray-core есть
+  **встроенный** `tun` inbound на gVisor-based userspace network stack,
+  который сам читает/пишет fd, переданный через env `xray.tun.fd`
+  (`platform.TunFdKey`) — отдельный tun2socks не нужен. Это прямо
+  задокументировано в `proxy/tun/README.md` как официальный Android-паттерн:
+  `VpnService` даёт fd → `xray.tun.fd` → inbound `protocol: "tun"` в
+  конфиге;
+- **тулинг для сборки `.aar`**: Go 1.25 (`brew install go`), `gomobile`
+  (`go install golang.org/x/mobile/cmd/gomobile@latest`), Android NDK
+  `28.2.13676358` (`sdkmanager "ndk;28.2.13676358"`, ~2.8GB) — всё
+  установлено в этой сессии. `libXray` склонирован на пинном теге
+  `v26.6.27` (тот же тег, что `build.py` использует по умолчанию для
+  `xray-core` как Go-зависимость — версии `libXray` и `xray-core` пины
+  синхронизированы намеренно), собран через `python3 build/main.py android`
+  → `libXray.aar` (~95MB, все 4 ABI: `armeabi-v7a`/`arm64-v8a`/`x86`/`x86_64`);
+- **API-контракт `libXray.aar` на пинном теге `v26.6.27` отличается от
+  README `main`-ветки**: `main`-ветка репозитория (README, прочитан до
+  клонирования) описывает единый JSON-dispatcher `Invoke(requestJSON)` —
+  этого метода на пинном теге ещё нет (`invoke.go` появился позже,
+  `curl .../v26.6.27/invoke.go` → `404`). На `v26.6.27` API — набор прямых
+  статических методов (`libXray.LibXray.setTunFd`/`newXrayRunFromJSONRequest`/
+  `runXrayFromJSON`/`stopXray`/`getXrayState`/`xrayVersion`), проверено
+  через `javap` по факту собранных `.class` в `classes.jar` внутри AAR, а не
+  по README — README и реальный собранный API за один и тот же тег могут
+  расходиться, если репозиторий активно развивается на `main`;
+- **формат Xray JSON-конфига для VLESS+REALITY-клиента** подтверждён по
+  исходникам `Xray-core` (`infra/conf/vless.go`, `infra/conf/transport_security.go`,
+  `infra/conf/tun.go`), не по памяти: outbound `vnext`/`users[].id,encryption,flow`,
+  `streamSettings.realitySettings.{fingerprint,serverName,publicKey,shortId,show}`
+  (единственное число `shortId`, не `shortIds` — тот массив только на
+  серверной стороне), inbound `tun` settings `{name, mtu}` (lowercase `mtu`
+  в текущем JSON-теге, хотя README показывает `MTU` — Go's `encoding/json`
+  регистронезависим при анмаршалинге, оба варианта сработали бы, но
+  использован актуальный тег из исходников);
+- **`VpnTunnelPlugin.kt`**: `startTunnel()` теперь строит Xray-конфиг
+  (`buildXrayConfig()`), пишет его в `context.filesDir`, стартует
+  `SimpleDimpleVpnService` через `Intent` (`startForegroundService`) и ждёт
+  колбэка через статический `companion object` мост (`pendingConnectCall`/
+  `notifyTunnelStarted`) — `PluginCall` нельзя напрямую передать в `Service`,
+  поэтому связь идёт через статическое состояние, а не bind/AIDL;
+- **`SimpleDimpleVpnService.kt`** (новый файл, был единственным классом
+  внутри `VpnTunnelPlugin.kt` в черновике — вынесен отдельно): `Builder.
+  establish()` поднимает TUN (`10.10.14.1/30`, default route `0.0.0.0/0` и
+  `::/0`, DNS `1.1.1.1`, MTU 1500) → `LibXray.setTunFd(pfd.fd)` →
+  `LibXray.runXrayFromJSON(...)`; foreground-уведомление обязательно для
+  VPN-сервисов на современном Android (`foregroundServiceType="specialUse"`
+  в манифесте — Android 14/API 34+ требует явный тип, `specialUse` выбран
+  как единственный подходящий стандартный тип для VPN-туннеля без
+  media/location/etc. семантики); `onRevoke()` переопределён — если
+  пользователь отзовёт VPN-consent из системных настроек, туннель
+  корректно остановится, а не останется в подвешенном состоянии;
+- **`AndroidManifest.xml`**: добавлены `<service>` с
+  `intent-filter action="android.net.VpnService"`, разрешения
+  `FOREGROUND_SERVICE`/`FOREGROUND_SERVICE_SPECIAL_USE`/`POST_NOTIFICATIONS`;
+- **`.aar` не коммитится**: 95MB, машинно-специфичен (зависит от локально
+  установленных версий NDK/Go на момент сборки) — `mobile/native-libs/` и
+  `mobile/android/app/libs/*.aar` добавлены в корневой `.gitignore`,
+  `mobile/README.md` документирует команду пересборки как воспроизводимый
+  шаг, а не одноразовый артефакт;
+- `./gradlew :app:assembleDebug` → `BUILD SUCCESSFUL`, `compileDebugKotlin`
+  прошёл без ошибок по обоим новым файлам, финальный `app-debug.apk`
+  (~207MB debug, нестрипнутые `libgojni.so` под все 4 ABI — Gradle
+  предупредил `Unable to strip the following libraries: libgojni.so`, не
+  блокирует сборку) реально содержит `lib/<abi>/libgojni.so` во всех 4
+  вариантах — проверено через `unzip -l` по итоговому APK, не только по
+  логам сборки.
+
+Последствия:
+
+- Definition of done Шага 2b по коду закрыт: `startTunnel()`/
+  `SimpleDimpleVpnService` реализованы, а не `TODO`, компилируются и
+  линкуются с реальным Xray-core;
+- **единственный оставшийся пункт** — живая проверка на реальном
+  устройстве/эмуляторе (нет AVD, `adb install` на реальном устройстве не
+  выполнялся в этой сессии). До этой проверки код "компилируется и
+  документированно корректен по API", но не "подтверждённо работает";
+- debug APK ~200MB — для реального распространения нужен ABI split или
+  Android App Bundle (`bundleDebug`/`bundleRelease` вместо
+  `assembleDebug`/`assembleRelease`) и/или отдельная работа над strip
+  `libgojni.so`, иначе релизная сборка будет неоправданно большой;
+- `mobile/README.md` переписан с нуля под новую архитектуру (без
+  tun2socks, с точным API-контрактом `libXray` на пинном теге) — старые
+  описания "не выбрана библиотека"/"TODO" удалены как устаревшие.
+
+## Decision 030
+
+Дата: `2026-07-09`
+
+Тема: Второй физически отдельный VPS (Contabo) поднят рядом с первым (OVH) —
+у проекта впервые есть 2 реально разных хоста/провайдера, IP-ротация между
+ними подтверждена вживую
+
+Уточнение по факту (важно для правильного прочтения этой записи и Decision
+025): whois/`ipinfo.io` для `57.128.220.83` (первый VPS) подтверждает
+`AS16276 OVH SAS` — то есть из трёх инбаундов, зарегистрированных на первом
+VPS в рамках Decision 025, лейбл `France Test Node` (`provider: OVH`) **не
+фейковый**, он совпадает с реальным хостингом. Фейковые — только два других
+лейбла на том же самом хосте: `Germany Test Node` (`Hetzner`, `AS24940`) и
+`Netherlands Test Node` (`DigitalOcean`, `AS14061`) — оба физически там же,
+где и честный OVH-лейбл, просто с придуманными provider/ASN для прохождения
+`inventory-policy.ts`. Ниже "второй реальный хост" значит именно это: второй
+физически отдельный VPS в дополнение к уже честному первому, а не первый
+реальный хост в принципе.
+
+Решение:
+
+- закрыт (частично) пробел из [[Decision 025]] "3 инбаунда на одном и том
+  же VPS, 2 из 3 provider/ASN/region в БД фейковые": подключён второй,
+  физически отдельный VPS — `167.86.77.100` (Contabo GmbH, `AS51167`,
+  Лотербур, Франция) — `deploy/ssh.env` (`vps_ip`/`vps_user`/`vps_password`,
+  lowercase-ключи, отдельно от исходного `VPS_IP`/`VPS_USER`/`VPS_PASSWORD`
+  для первого VPS);
+- на этом VPS через `deploy/xray/provision-node.sh register` поднят
+  настоящий `xray-core` inbound (VLESS+REALITY+TCP, pool `fr-contabo-1`,
+  честный `provider: Contabo`/`asn: 51167`/`countryCode: FR`, без пометки
+  `[TEST: co-located...]`) и зарегистрирован в control-plane, который
+  крутится на первом VPS (`http://57.128.220.83:8080`) — использована уже
+  существующая, не истёкшая `AuthSession` админ-пользователя `Xray Fleet
+  Automation` (заведён ещё в [[Decision 025]]), новую сессию заводить не
+  понадобилось;
+- `deploy/xray/sync-clients.sh` прогнан вручную на новой ноде — реальные
+  `User.vlessUuid` существующих e2e-тестовых пользователей подтянулись в
+  `inbound.settings.clients` этой ноды тем же механизмом, что и на трёх
+  исходных;
+- **IP-ротация подтверждена вживую в обе стороны, не только конфигом**:
+  - `POST /api/routes/resolve` для тестового пользователя вернул
+    `connectionConfig` на новую ноду (`baseline_pool_priority`, приоритет
+    30 — ниже, чем у существующих fake-нод, поэтому выбрана первой);
+    локальный `xray-core` клиент с этим конфигом поднял SOCKS5-туннель,
+    `curl --socks5-hostname ... https://ifconfig.me` вернул `167.86.77.100`
+    — реальный IP второго VPS;
+  - нода временно переведена в `isActive: false` через
+    `PATCH /api/admin/endpoints/:id` (симуляция отказа); повторный
+    `routes/resolve` для того же пользователя тут же вернул fallback на
+    `France Test Node` (первый VPS, `57.128.220.83`) —
+    `assignmentReason: baseline_pool_priority` для нового primary после
+    исключения отказавшей ноды; клиент с новым конфигом подключился и
+    `curl` через него вернул `57.128.220.83`;
+  - нода возвращена в `isActive: true` после проверки — это первый момент
+    в проекте, когда переключение маршрута backend'ом реально меняет
+    исходящий IP клиента между двумя разными физическими хостами, а не
+    только между портами одного и того же VPS;
+- побочный эффект, важный для честности инвентаря: `routePolicy.trace`
+  теперь показывает `shortlistDistinctProviders: 4`/`shortlistDistinctAsns:
+  4` — формально всё ещё 4, как и раньше (уникальность считается по
+  заявленным в БД provider/ASN, а не по физическому хосту), но теперь **2
+  из 4** этих значений подкреплены физически разными хостами (OVH + Contabo),
+  а не 1 из 4, как было бы при наивном прочтении "3 fake + 1 real".
+
+Последствия:
+
+- пробел из [[Decision 025]] закрыт наполовину: теперь 2 из 4 endpoint'ов —
+  реально разные хосты у разных провайдеров (OVH, первый VPS; Contabo,
+  второй VPS), остальные 2 (`Germany Test Node`/Hetzner,
+  `Netherlands Test Node`/DigitalOcean) — по-прежнему fake-лейблы на
+  первом (OVH) хосте с намеренно вводящими в заблуждение provider/ASN
+  метками (см. label `[TEST: co-located on single VPS, ...]`); для
+  честного закрытия пробела целиком нужен ещё минимум 1 такой же реальный
+  VPS у третьего провайдера, после чего оставшиеся 2 fake-ноды можно будет
+  retire (сейчас retire заблокирован `evaluateEndpointRetirement()`, пока
+  живых нод меньше минимума failure domains);
+- подтверждено сквозное поведение, которое раньше проверялось только
+  внутри одного хоста ([[Decision 025]]): backend меняет
+  `connectionConfig.params.address` на другой физический IP, и
+  reference-клиент (`xray-core`) реально следует за этим изменением —
+  это и есть то самое "клиент сам находит рабочий маршрут" из `PRODUCT.md`,
+  теперь проверенное между двумя независимыми хостами, а не эмулированное;
+  тот же путь (`routes/resolve` → retire/reactivate → повторный
+  `routes/resolve`) можно использовать как ручной smoke-test для будущих
+  новых нод;
+- второй VPS не имеет собственного деплоя backend/frontend (Шаг 4 деплоя
+  сюда не переносился) — это чисто вторая Xray-transport-нода, control-plane
+  остаётся один, на первом VPS.
+
+## Decision 031
+
+Дата: `2026-07-09`
+
+Тема: Шаг 3 (client-side auto-fallback executor) проверен вживую против
+реального backend и двух реальных Xray-нод; что именно осталось непроверенным
+
+Решение:
+
+- `connectWithFallback()` из
+  [frontend/src/lib/connectFallback.ts](../frontend/src/lib/connectFallback.ts)
+  вызван напрямую (не через юнит-тесты с моками, а отдельным `tsx`-скриптом,
+  импортирующим тот же файл) с реальными `deps`:
+  - `fetchCandidateConfig`/`reportFailure` — настоящие HTTP-вызовы в
+    `http://57.128.220.83:8080` (`/api/routes/resolve` с
+    `manualEndpointId`, `/api/routes/feedback`), не заглушки;
+  - `attemptTunnel` — реально поднимает локальный `xray-core`-клиент
+    (Docker) с полученным `connectionConfig` и проверяет исходящий IP через
+    `curl --socks5-hostname ... https://ifconfig.me`, тем же паттерном, что
+    в [[Decision 030]];
+- primary-кандидат (Contabo-нода, см. [[Decision 030]]) остановлен через
+  `docker stop simple-dimple-xray-fr-contabo-1` прямо на живом VPS — это
+  настоящий, а не подставной провал: `attemptTunnel` реально получил отказ
+  соединения (`CURL_FAILED`), не эмулированную ошибку;
+- executor поймал провал, отправил `POST /api/routes/feedback` с
+  `failureReason: connect_refused` для Contabo-эндпоинта, перешёл к
+  кандидату №2 (`France Test Node`, физически OVH — см. уточнение в
+  [[Decision 030]]) и получил рабочий туннель: `curl` через него вернул
+  `57.128.220.83`;
+- итоговый `outcome` — `{ ok: true, endpointId: "85b210ba-...", attempts: 2,
+  lastError: null }`, то есть ровно два реальных кандидата были
+  перебраны, как и требует Definition of done Шага 3;
+- **feedback дошёл и был учтён**: последующий `GET /api/session` для того
+  же пользователя показал `routeHealth` с реальным
+  `penaltyScore: 12`/`dominantFailureReason: "connect_refused"`/
+  `status: "penalized"` для Contabo-эндпоинта — не только запрос ушёл, но и
+  backend реально изменил своё состояние по его следам;
+- после теста Contabo-контейнер запущен обратно (`docker start`), инвентарь
+  оставлен в исходном рабочем состоянии.
+
+Что осталось непроверенным (сознательно вне скоупа этой проверки):
+
+- сам `connectNativeTunnel`/Capacitor-плагин не участвовал — тест напрямую
+  подавал в `connectWithFallback` собственный `attemptTunnel` вместо
+  реального native-моста. Настоящая кнопка "Подключить" на Android-устройстве
+  всё ещё не проверялась вживую — это блокируется незакрытым Шагом 2b (нет
+  AVD/реального устройства), а не этим шагом;
+- `useRouteSession.ts` вызывает `connectWithFallback` только при
+  `isNativeTunnelAvailable()` — в браузере (PWA) этот путь всегда no-op,
+  так и остаётся, проверка этого не меняет.
+
+Последствия:
+
+- Definition of done Шага 3 закрыт по всем трём пунктам, которые не требуют
+  Android-устройства (провал не требует ручного похода на `Server`, ≥2
+  кандидата реально перебираются, каждый провал долетает до backend);
+- единственный оставшийся пункт для полного закрытия Шага 2/3 вместе —
+  тот же самый, что и в Шаге 2b: живая проверка на реальном
+  устройстве/эмуляторе через настоящую кнопку в приложении.
+
+## Decision 033
+
+Дата: `2026-07-09`
+
+Тема: `deploy/manual-deploy.sh` прогнан вживую против реального VPS (не
+локального Docker) — закрыт последний непроверенный кусок Шага 4
+
+Решение:
+
+- `deploy/manual-deploy.sh` запущен с локальной машины против VPS2 (Contabo,
+  `167.86.77.100`, см. [[Decision 030]]) — тот же хост, что уже нёс
+  Xray-транспортную ноду, но ещё не имел собственного деплоя
+  backend/frontend. Выбран специально как "чистый" таргет для этой проверки
+  (в отличие от VPS1, где backend/frontend уже были подняты раньше в этой же
+  сессии другим путём);
+- аутентификация — паролем через `sshpass`, а не ssh-ключ (см.
+  `deploy/ssh.env`): скрипт использует голый `ssh`/`rsync`, которые сами по
+  себе не поддерживают non-interactive password auth, поэтому `ssh` был
+  подменён во временном `PATH` на обёртку
+  `exec sshpass -p "$PASSWORD" /usr/bin/ssh "$@"` — сам `manual-deploy.sh`
+  не менялся;
+- полный путь скрипта отработал с первого раза на чистом хосте без единой
+  ручной правки: rsync исходников → `docker compose ... --profile tools
+  build migrate && run --rm migrate` → `up --build -d` → `postgres`
+  (healthy), `backend`, `frontend`, `route-reprobe-worker` — все `Up`;
+  `GET /api/session` → `401`, `GET /` → `200` — тот же живой сигнал
+  успешного стека, что и в локальной проверке [[Decision 027]], но теперь
+  через настоящий SSH/rsync-путь на настоящем сервере, а не
+  `docker compose` на dev-машине.
+
+Последствия:
+
+- закрыт единственный пункт Шага 4, помеченный `❌` в `PRIORITY_PLAN.md`, —
+  реальный прогон `manual-deploy.sh` против реального VPS;
+- deploy-job'ы `ci.yml` (`deploy-staging`/`deploy-prod`) по-прежнему не
+  проверены и не будут проверены без GitHub remote/secrets/environments —
+  это отдельное, более серьёзное действие (публикация репозитория,
+  управление секретами), сознательно не предпринятое в рамках этой
+  проверки;
+- побочный эффект: VPS2 теперь несёт полноценный, независимый
+  backend/frontend/postgres стек (пустая БД, никак не связан с
+  control-plane на VPS1) вдобавок к уже работающей там Xray-ноде — по сути
+  готовая "staging"-инсталляция для пункта 6 Definition of done Шага 4
+  ("минимум 2 окружения"), хоть и без автоматического деплоя по push.
+
+## Decision 034
+
+Дата: `2026-07-09`
+
+Тема: Ansible-автоматизация fleet provisioning написана и проверена вживую —
+закрыт последний пробел Шага 5, отложенный в [[Decision 025]] до появления
+второго реального VPS
+
+Решение:
+
+- [deploy/ansible/](../deploy/ansible/) — Ansible-эквивалент
+  `deploy/xray/provision-node.sh`: роль `xray_node`
+  (`roles/xray_node/tasks/main.yml`) + три тонких playbook'а
+  (`provision-node.yml`/`retire-node.yml`/`reactivate-node.yml`) вместо трёх
+  под-команд одного bash-скрипта;
+- **идемпотентность — сознательное отличие от bash-скрипта**:
+  `provision-node.sh register` перегенерирует X25519-keypair/UUID/shortId на
+  каждый вызов, даже против уже запровиженной ноды — приемлемо для разового
+  ручного вызова, не для повторных прогонов по инвентарю. Роль читает
+  crypto-материал обратно с диска (`config.json` для private key/shortId/
+  UUID/SNI, плюс sidecar `client-meta.json` для public key/fingerprint,
+  которых нет на сервере — REALITY их не хранит серверной стороной) вместо
+  повторной генерации; регистрация в control-plane тоже идемпотентна —
+  `GET /api/admin/endpoints` проверяется на существующий `poolCode` перед
+  `POST`, чтобы повторный прогон не плодил дубликаты;
+- **проверено вживую**, не только написано: одноразовый тестовый pool
+  (`ansible-test-1`) поднят через `provision-node.yml` на существующем OVH
+  VPS (без нового железа — четвёртая по счёту, теперь уже точно тестовая, а
+  не пятая реальная нода). Первый прогон — Docker install-check, генерация
+  keypair, запуск контейнера, регистрация — всё сработало. Повторный прогон
+  того же playbook'а против того же pool — `changed: 0`, все шаги генерации
+  и регистрации корректно пропущены (идемпотентность подтверждена, не
+  предположена). `retire-node.yml`/`reactivate-node.yml` тоже прогнаны
+  вживую — `isActive` корректно переключался в обе стороны;
+- **два бага пойманы и исправлены по пути**, оба — в задаче автоопределения
+  публичного IP (актуально только когда `xray_ip_address` не задан в
+  инвентаре явно):
+  1. `ansible.builtin.uri` к `https://ifconfig.me` вернул полную HTML-страницу
+     вместо IP — `ifconfig.me` отдаёт HTML не-`curl`-агентам, а
+     `uri`-модуль по умолчанию шлёт `User-Agent: ansible-httpget`. Это
+     реально попало в `ipAddress` зарегистрированного endpoint'а при первом
+     прогоне — поймано, потому что `GET /api/admin/endpoints` показал
+     HTML-блоб вместо IP, а не потому что playbook упал;
+  2. после переключения на `ifconfig.me/ip` (текстовый эндпоинт вне
+     зависимости от UA) получили корректный, но **IPv6**-адрес — на
+     dual-stack VPS с IPv6-маршрутом с более высоким приоритетом, тогда как
+     весь остальной инвентарь проекта — IPv4. Финальный фикс — переключение
+     на `https://api.ipify.org` (IPv4-only по дизайну, в отличие от
+     `api64.ipify.org`);
+  3. отдельно, некритичный баг репортинга: `docker start` на уже
+     запущенном контейнере — тихий no-op (exit 0, ничего в stderr), не
+     печатает никакого сообщения про "already running" (в отличие от
+     `docker run`) — `changed_when`, пытавшийся парсить такое сообщение,
+     всегда давал ложный `changed: true`; заменено на плоский
+     `changed_when: false`, так как это действие безопасно и не имеет
+     наблюдаемого эффекта, когда контейнер уже запущен;
+- тестовый pool полностью снесён после проверки (`isActive: false` через
+  control-plane → удаление строк `Endpoint`/`ServerPool` напрямую из БД, раз
+  admin API не поддерживает DELETE → `docker rm`/`rm -rf` конфига на VPS) —
+  инвентарь оставлен в исходном состоянии (4 ноды: 3 co-located fake-лейбла
+  на OVH + 1 реальная Contabo, как после [[Decision 030]]).
+
+Последствия:
+
+- условие, из-за которого Ansible-обвязка была отложена в [[Decision
+  025]] ("нет ещё реальных вторых-третьих VPS") больше не в силе — теперь
+  есть 2 реальных VPS, playbook написан и подтверждён против одного из них;
+  `provision-node.sh` не удалён и остаётся рабочим путём для разовой ручной
+  регистрации — Ansible пригождается, когда нод/провайдеров больше одного за
+  раз;
+- оба найденных IP-detection бага были бы незаметны без живой проверки: код
+  выглядел правильно (валидный HTTP-запрос, валидный JSON-парсинг
+  keypair-вывода), проблема была в поведении конкретного внешнего сервиса и
+  конкретной сетевой конфигурации VPS — ни один юнит-тест такое не поймает.
+
+## Decision 035
+
+Дата: `2026-07-09`
+
+Тема: Шаг 2b — живая проверка на Android-эмуляторе: нативный `VpnService`
+реально активируется через продакшн-код, но сквозная доставка трафика через
+туннель не подтверждена (найден пробел, не закрыт в этой сессии)
+
+Решение:
+
+- поднято реальное Android-окружение на этой машине: Android SDK `emulator` +
+  `system-images;android-34;google_apis;arm64-v8a` доустановлены через
+  `sdkmanager` (ранее был установлен только тулинг для сборки, без эмулятора,
+  см. [[Decision 028]]), создан AVD (`avdmanager create avd`), эмулятор
+  реально загружен (`emulator -avd ... -no-snapshot`), уже собранный
+  `app-debug.apk` (с реально влинкованным `libgojni.so`, [[Decision 029]])
+  установлен и запущен через `adb`;
+- **временно** (не закоммичено, откачено после проверки) `mobile/capacitor.config.ts`
+  получил `server.url: "http://57.128.220.83"` — иначе WebView грузит
+  бандл `frontend/dist` без бэкенда за ним (относительные `fetch("/api/...")`
+  бьют в собственный локальный ориджин Capacitor, которого не существует).
+  Направление WebView на реально задеплоенный VPS1 (там nginx проксирует
+  `/api` на backend, [deploy/nginx/frontend.conf](../deploy/nginx/frontend.conf))
+  — рабочий способ прогнать настоящий продакшн-код на эмуляторе/устройстве,
+  не переписывая frontend под отдельный API base URL;
+- та же временная правка потребовала `android:usesCleartextTraffic="true"`
+  в `AndroidManifest.xml` (backend пока без TLS) — тоже откачено после теста;
+- **вход в аккаунт выполнен по-настоящему**, не через инъекцию localStorage:
+  через `chrome://inspect`-совместимый CDP (WebView debug socket
+  `webview_devtools_remote_<pid>`, `adb forward` + `websocket-client` в
+  Python) заполнена форма "Регистрация" (создание тестового аккаунта без
+  email-подтверждения) реальными React-совместимыми событиями (`Object.
+  getOwnPropertyDescriptor` native setter + `dispatchEvent(new Event('input'))`,
+  иначе React не видит программную запись в controlled input) — учётка
+  реально создана в БД на VPS1;
+- **нажатие "Подключить" вызвало настоящий системный диалог Android**
+  `Connection request` (`com.android.vpndialogs.ConfirmDialog`) — то есть
+  `VpnTunnelPlugin.startTunnel()` реально дошёл до `VpnService.prepare()`,
+  это не мок и не заглушка. После согласия (`OK`) реально поднялся `tun`-интерфейс
+  с параметрами из `SimpleDimpleVpnService.Builder` ([[Decision 029]]):
+  `10.10.14.1/30`, что подтверждено через `adb shell ip addr show`;
+  `dumpsys window`/`logcat` показали статус-бар с VPN-иконкой-ключом и
+  `ActivityManager: ... START_TUNNEL cmp=.../.SimpleDimpleVpnService`;
+- **побочная находка (реальный баг обвязки самого теста, не продукта)**:
+  `connectWithFallback()` ([[Decision 031]]) реально перебрал несколько
+  кандидатов подряд, вызывая `VpnService.prepare()` для каждого — пока я
+  недостаточно быстро нажимал `OK` на первых системных диалогах, executor
+  корректно уходил к следующему кандидату по таймауту. Но при этом старые
+  `Xray-core`/`tun`-инстансы от предыдущих попыток **не были остановлены**
+  перед стартом нового — получилось до 4 параллельных `tun0`-`tun3` с одним
+  и тем же адресом `10.10.14.1/30` и несколько живых Xray-core рантаймов в
+  одном процессе одновременно, один из них слал трафик на **уже брошенный**
+  кандидат (`Netherlands Test Node`), логируя `[Error] proxy/tun: operation
+  timed out`. После `force-stop` + чистого повторного подключения (один
+  диалог, одно согласие) — только `tun0`, только правильный (Contabo)
+  адрес в логах, ошибок `timed out` не было. **TODO, не в скоупе этой
+  сессии**: `SimpleDimpleVpnService`/`VpnTunnelPlugin` должны надёжно
+  останавливать предыдущий Xray-core/tun перед стартом нового при
+  последовательных попытках fallback — сейчас это выявлено только живым
+  тестом с намеренно медленными нажатиями, обычный юзер с одним нажатием
+  этого не увидит, но при реальном провале primary-ноды на устройстве
+  (ровно то, что Шаг 3 призван обрабатывать) это может создать точно такую
+  же гонку;
+- **главный незакрытый вопрос**: после чистого одиночного подключения
+  (только `tun0`, только Contabo-нода в логах `accepted tcp:167.86.77.100:8446`)
+  запрос через WebView (`fetch` на `https://ifconfig.me/ip` и на
+  `http://57.128.220.83/health` по IP-литералу, без DNS) не прошёл —
+  `net::ERR_NAME_NOT_RESOLVED`/`net::ERR_CONNECTION_RESET`/таймауты. На
+  стороне Contabo-ноды (`docker logs simple-dimple-xray-fr-contabo-1`) за
+  всё время live-теста **не появилось ни одной новой строки** о входящем
+  соединении с эмулятора — то есть REALITY-хендшейк с эмулятора либо не
+  дошёл до сервера вообще, либо был сброшен раньше. Не выяснено, что именно
+  это: (а) ограничение окружения эмулятора (nested ARM64 qemu + gVisor
+  `tun`-стек `libXray`, известный класс проблем для taken-over egress
+  на некоторых эмуляторах), (б) недостаточно быстрая диагностика в рамках
+  одной сессии, (в) реальный баг в клиентском Xray-конфиге/roundtrip. На
+  реальном физическом устройстве (не эмуляторе) это может вести себя иначе —
+  именно поэтому исходный DoD Шага 2b всегда указывал на "реальное
+  устройство", а не эмулятор.
+
+Последствия:
+
+- Definition of done Шага 2b **частично** закрыт живым тестом: нативная
+  кнопка "Подключить" на Android реально доходит до `VpnService`/Xray-core,
+  включая настоящий системный VPN-permission flow — это не было проверено
+  ни разу раньше (см. "единственное, что осталось" в записях по Шагу 2b);
+- НЕ закрыт: "публичный IP меняется, трафик реально идёт через туннель" —
+  подтверждено на dev-машине через reference-клиент ([[Decision 025]],
+  [[Decision 030]]), но НЕ подтверждено через нативную Android-обвязку ни
+  на эмуляторе (эта сессия), ни на реальном устройстве (не пробовалось);
+- найден реальный, воспроизводимый в живом тесте баг гонки при повторных
+  попытках подключения (см. выше) — стоит отдельной задачи на будущее,
+  независимо от того, окажется ли сетевая проблема эмулятора артефактом
+  окружения или реальным багом;
+- `mobile/capacitor.config.ts`/`AndroidManifest.xml` возвращены к исходному
+  состоянию после теста — `server.url`-override и `usesCleartextTraffic`
+  были тестовой обвязкой, не постоянным решением; если тестирование на
+  реальном устройстве повторится, тот же трюк понадобится снова (или нужно
+  решить вопрос API base URL для native-сборки отдельно и постоянно).
+
+## Decision 036: race-баг из Decision 035 исправлен; клиентский Xray-конфиг проверен, структурных проблем не найдено
+
+Тема: два открытых пункта из [[Decision 035]] — race-баг при повторных
+попытках подключения и невыясненный сквозной трафик до Contabo-ноды.
+
+Решение:
+
+- **race-баг исправлен**: `SimpleDimpleVpnService.startTunnel()` (и
+  `mobile/android-skeleton/SimpleDimpleVpnService.kt`, источник истины,
+  синхронно) теперь останавливает предыдущий запущенный Xray-core/tun
+  (`stopRunningTunnel()`, новый приватный метод, переиспользован из
+  `stopTunnel()`) перед стартом нового, если `isRunning`/`tunInterface`
+  уже не пустые — закрывает ровно ту гонку, что была пойманы живым тестом
+  (до 4 параллельных `tun0`-`tun3`). На момент написания этого пункта не
+  было проверено компиляцией (см. [[Decision 037]] — там же выяснилось,
+  что Java/Android SDK на машине на самом деле есть, просто не в `PATH`);
+- **клиентский Xray-конфиг просмотрен** (`VpnTunnelPlugin.buildXrayConfig()`
+  в обоих копиях) в сравнении с серверным `deploy/ansible/roles/xray_node/
+  templates/xray-config.json.j2` и `deploy/xray/dev-config.json` —
+  `flow`/`fingerprint`/`security`/`network`/`encryption` совпадают по
+  форме с тем, что сервер ожидает от VLESS+REALITY+Vision-клиента;
+  структурных расхождений не найдено. Фактические runtime-значения
+  (`publicKey`/`shortId`/`sni` для конкретно `fr-contabo-1`) не в
+  репозитории — они провижнились живьём на VPS через ansible-переменные,
+  проверить их конкретные значения по коду нельзя;
+- добавлено единственное практическое изменение в конфиг:
+  `loglevel` клиентского Xray-core поднят с `"warning"` до `"debug"` —
+  на живом тесте с `"warning"` в `docker logs`/`logcat` не было видно,
+  на каком именно шаге (DNS/TCP dial/REALITY handshake) обрыв происходит,
+  только "ничего не пришло на сервер". `"debug"` — стандартный минимально
+  инвазивный способ получить эту трассировку при следующей проверке;
+- **главный вопрос из Decision 035 остаётся открытым** — ни `race`-фикс,
+  ни просмотр конфига не объясняют и не могут объяснить сами по себе,
+  почему REALIT-хендшейк не дошёл до Contabo-ноды: это требует новой
+  живой проверки на реальном физическом устройстве (не эмуляторе) с
+  собранным APK, включающим оба изменения выше, и разбора `debug`-уровня
+  логов `logcat`/`docker logs` на месте.
+
+Последствия:
+
+- Definition of done Шага 2b по-прежнему **не закрыт** — сквозной трафик
+  через туннель так и не подтверждён нативной Android-обвязкой; этот
+  Decision закрывает только два производных пункта (race-баг, ревью
+  конфига), не основной вопрос;
+- следующий живой тест (когда появится реальное устройство) должен
+  собрать APK заново (`libXray.aar` уже должен быть на месте, см.
+  [[Decision 029]]) и в первую очередь смотреть `debug`-уровень логов
+  Xray-core на телефоне и `docker logs simple-dimple-xray-fr-contabo-1`
+  на Contabo-ноде одновременно.
+
+## Decision 037: APK с обоими изменениями из Decision 036 собран и компилируется чисто
+
+Тема: закрытие оставшегося TODO из [[Decision 036]] — компайл-чек race-фикса.
+
+Решение:
+
+- вопреки тому, что написано в [[Decision 036]] ("нет доступного Java
+  runtime"), на машине на самом деле уже стояли `openjdk@17`/`openjdk@21`
+  и Android SDK (`/opt/homebrew/share/android-commandlinetools`,
+  `mobile/android/local.properties` уже указывал на него) — просто не в
+  `PATH`/`JAVA_HOME` этой оболочки по умолчанию. `openjdk@17` не подошёл
+  (`error: invalid source release: 21` — проект целится в Java 21),
+  `openjdk@21` собрал всё чисто;
+- `./gradlew :app:assembleDebug` с `JAVA_HOME=$(brew --prefix openjdk@21)`
+  прошёл `BUILD SUCCESSFUL`, включая `:app:compileDebugKotlin` — то есть
+  оба изменения из [[Decision 036]] (`stopRunningTunnel()`-рефакторинг в
+  `SimpleDimpleVpnService.kt`, `loglevel: "debug"` в
+  `VpnTunnelPlugin.buildXrayConfig()`) компилируются без ошибок;
+- результат: `mobile/android/app/build/outputs/apk/debug/app-debug.apk`
+  (~198MB, debug, не подписан релизным ключом — стандартно для debug-сборки).
+
+Последствия:
+
+- TODO "собрать и прогнать compileDebugKotlin перед следующим тестом" из
+  [[Decision 036]] закрыт — компиляция подтверждена, но это не заменяет
+  живой тест на устройстве (сборка компилируется — не значит, что race-фикс
+  ведёт себя корректно в реальном сценарии `connectWithFallback` с
+  несколькими быстрыми попытками подряд);
+- полезный побочный факт для следующей сессии: рабочая команда сборки —
+  `JAVA_HOME=$(brew --prefix openjdk@21) PATH="$JAVA_HOME/bin:/opt/homebrew/share/android-commandlinetools/cmdline-tools/latest/bin:/opt/homebrew/share/android-commandlinetools/platform-tools:$PATH" ANDROID_HOME=/opt/homebrew/share/android-commandlinetools ./gradlew :app:assembleDebug`
+  из `mobile/android/` — не нужно ничего доустанавливать через `sdkmanager`
+  заново, всё уже на месте с прошлой сессии ([[Decision 028]]).
+
+## Decision 038: REALITY dev-ключ убран из git
+
+Дата: `2026-07-10`
+
+Тема: пересмотр части [[Decision 022]] про «dev-ключ REALITY в
+`deploy/xray/dev-config.json` — это dev-контур, не меняем».
+
+Контекст: код-ревью справедливо указал, что «non-production» не делает
+закоммиченный приватный ключ безопасным — тот же X25519 keypair, попади он
+случайно в чужой inbound (скопировали конфиг как шаблон, не заметив, что
+ключ настоящий), даёт MITM. Публичный репозиторий тут ни при чём (утечки
+в интернет не было), но ключ, живущий в истории git, — это ключ, доступный
+всем, у кого есть клон.
+
+Решение:
+
+- `deploy/xray/dev-config.json` перестал коммититься (`git rm --cached`,
+  добавлен в `.gitignore`) — вместо него в репозитории лежит
+  `dev-config.template.json` с плейсхолдерами;
+- `deploy/xray/generate-dev-config.sh` генерирует свежий keypair через
+  `docker run ghcr.io/xtls/xray-core:latest x25519` и пишет локальный
+  `dev-config.json`, который в git не попадает;
+- скомпрометированный keypair, ранее захардкоженный в `backend/src/defaults.ts`
+  (`defaultEndpointTransportConfigs`), убран вместе с самой константой — она
+  всё равно не была нигде подключена (`connectionConfig` строится из
+  `EndpointTransportConfig` в БД, см. `backend/src/store/endpoints.ts`), так
+  что это было мёртвым кодом, дублирующим секрет;
+- production-провижен уже не пересекается с этой проблемой:
+  `deploy/ansible/roles/xray_node` генерирует keypair на хосте при первом
+  провижене и не кладёт его в репозиторий и инвентарь.
+
+Последствия:
+
+- перед `docker compose --profile xray up xray` разработчику нужно один раз
+  выполнить `deploy/xray/generate-dev-config.sh` — README в `deploy/xray/`
+  обновлён;
+- старый закоммиченный keypair остаётся в истории git этого репозитория, но
+  так как наружу (на публичный remote) он не публиковался, ротация по
+  затронутым inbound'ам не требуется — это чисто гигиенический фикс на
+  будущее.
+
+## Decision 039: TLS-терминатор (caddy) перед control-plane — closed голый HTTP
+
+Дата: `2026-07-10`
+
+Тема: control-plane (backend/frontend, Шаг 4 PRIORITY_PLAN.md) обслуживался
+без TLS — `deploy/nginx/frontend.conf` слушал только `:80`, `backend`
+публиковал `8080:8080` напрямую (`deploy/compose.prod.yaml`),
+`manual-deploy.sh` предлагал проверять `http://<IP>`. Пароли, OTP-коды и
+`x-auth-session-id` (см. `frontend/src/lib/http.ts`) ходили открытым текстом
+до самого пользователя — для VPN-продукта это обесценивает сам туннель:
+даже если xray-транспорт зашифрован, авторизация в приложении — нет.
+
+Решение:
+
+- добавлен сервис `caddy` (`caddy:2-alpine`) в `deploy/compose.prod.yaml` —
+  единственный контейнер, публикующий хост-порты (`80:80`, `443:443`);
+  `frontend` и `backend` портов наружу больше не публикуют, доступны только
+  внутри docker-сети;
+- `deploy/Caddyfile` — reverse proxy на `frontend:80` с автоматическим TLS
+  (ACME HTTP-01/Let's Encrypt) по домену `${CONTROL_PLANE_DOMAIN}`;
+  `deploy/.env` получил `CONTROL_PLANE_DOMAIN`/`ACME_EMAIL`;
+- `manual-deploy.sh` и `deploy/README.md` обновлены: домен должен A-записью
+  указывать на IP VPS ДО первого `up` (иначе ACME challenge не пройдёт и
+  caddy уйдёт в crash-loop) — это единственная новая ручная предпосылка.
+
+**Уточнено [[Decision 040]]**: требование «обязательно домен» ниже больше не
+актуально — добавлен режим `tls internal` (самоподписанный сертификат) для
+деплоя без домена/DNS.
+
+Альтернативы, которые не выбрали:
+- certbot + nginx (ручной cron для renew) — caddy получает и продлевает
+  сертификат сам, без отдельного таймера/скрипта;
+- TLS прямо в nginx (frontend-контейнер) — оставили отдельным сервисом,
+  чтобы `frontend`/`backend` не знали про сертификаты и домены вовсе, и
+  чтобы порт 80 для ACME-challenge не конфликтовал с SPA-fallback nginx.
+
+Последствия:
+
+- новая обязательная предпосылка перед деплоем с настоящим Let's Encrypt:
+  домен + DNS A-запись на VPS, заполненные `CONTROL_PLANE_DOMAIN`/`ACME_EMAIL`
+  в `deploy/.env` (без домена — режим `tls internal`, см. [[Decision 040]]);
+- `CORS_ALLOWED_ORIGINS` стоит выставить в `https://<CONTROL_PLANE_DOMAIN>`
+  вместо reflect-all при включённом Let's Encrypt;
+- ACME HTTP-01-путь по-прежнему не проверен вживую на реальном VPS в этой
+  сессии — требует реального публичного DNS, недоступного из песочницы.
+  Прежде чем полагаться на него в реальном деплое: прогнать
+  `manual-deploy.sh` с настоящим доменом и проверить `curl -v
+  https://<домен>` — валидный публичный сертификат (не self-signed).
+  Путь `tls internal` (без домена), в отличие от ACME, проверен вживую
+  локальным Docker в этой же сессии — см. [[Decision 040]].
+
+## Decision 040: режим `tls internal` без домена — добавлен и проверен вживую (нашли и исправили реальный баг в процессе)
+
+Дата: `2026-07-10`
+
+Тема: продолжение [[Decision 039]] — пользователь спросил, обязателен ли
+реальный домен для TLS, или можно временно обойтись без него. Да: caddy
+умеет быть собственным локальным CA (`tls internal`) и выдавать
+самоподписанный сертификат без публичного DNS вообще.
+
+Реализация (первая попытка, оказалась нерабочей): адрес сайта в
+`deploy/Caddyfile` — catch-all `{$CONTROL_PLANE_DOMAIN::443}` с дефолтом
+`:443`, чтобы работало «из коробки» вообще без заполнения `.env`.
+
+Проверка вживую локальным Docker (`docker run caddy:2-alpine`, затем полный
+`docker compose -f deploy/compose.prod.yaml --env-file deploy/.env up -d` +
+`curl`/`openssl s_client`) нашла два реальных бага раньше, чем это дошло бы
+до реального VPS:
+
+1. **Catch-all `:443` без явного хоста не работает даже с `tls internal`.**
+   `caddy adapt` собирает конфиг без ошибок, процесс стартует, но на любое
+   входящее TLS-соединение сервер роняет handshake:
+   `tlsv1 alert internal error` (`openssl s_client`: `no peer certificate
+   available`). Причина: без явного хоста в адресе сайта caddy не знает,
+   для какого SNI/IP заранее выпускать сертификат, и не издаёт его вообще —
+   ни on-demand (это отдельный небезопасный режим, который надо включать
+   явно), ни статически. **Фикс**: адрес сайта должен всегда содержать
+   явный хост — домен ИЛИ голый IP (caddy умеет internal-сертификаты и с IP
+   SAN, не только с доменными именами). `CONTROL_PLANE_DOMAIN` в
+   `deploy/.env` стал обязательным всегда (плейсхолдер
+   `change-me.example-or-ip` вместо пустой строки) — переключение
+   ACME/internal происходит только через `ACME_EMAIL`, не через
+   присутствие/отсутствие домена.
+2. **`docker compose --env-file X` не влияет на `env_file: .env` внутри
+   compose-файла.** Для теста подставлял значения через
+   `docker compose -f deploy/compose.prod.yaml --env-file /tmp/test.env
+   up`, ожидая, что `/tmp/test.env` попадёт в контейнер через
+   `env_file: .env` сервисов — не попало, контейнер стабильно получал
+   старое значение из `deploy/.env`. `--env-file` подставляет `${VAR}` в
+   самом YAML (интерполяция), а `env_file: .env` — жёстко прописанный путь
+   относительно `compose.prod.yaml` (то есть всегда `deploy/.env`),
+   независимый от CLI-флага. Для реального пути (`manual-deploy.sh`) это
+   не баг — там `--env-file deploy/.env` и `env_file: .env` (относительно
+   `deploy/`) всегда указывают на один и тот же файл — но чуть не увело
+   тестирование в сторону: 3 попытки curl подряд с "не тем" доменом,
+   прежде чем стало ясно, что дело не в caddy.
+
+После фикса (#1) — `docker compose ... up -d` с
+`CONTROL_PLANE_DOMAIN="localhost"`, `ACME_EMAIL` закомментирован:
+
+- `curl -sk https://localhost/` → `200` (frontend);
+- `curl -sk https://localhost/api/session` → `401` (backend через
+  `nginx`/`frontend` — тот же живой сигнал "не авторизован", что и в
+  Decision 027/033);
+- `curl http://localhost:8080/` → connection refused (backend больше не
+  публикует порт наружу);
+- `curl http://localhost/` → `308` редирект на `https://` (автоматика caddy).
+
+Также подтверждено раньше отдельным `docker run` тестом: `{$VAR:default}`
+в Caddyfile берёт дефолт, только если переменная окружения полностью
+отсутствует — `VAR=""` (пустая строка) в `.env`/`env_file` не считается
+отсутствующей и подавляет дефолт (см. обновлённый комментарий в
+`deploy/.env`).
+
+Решение:
+
+- `deploy/Caddyfile` — адрес сайта `{$CONTROL_PLANE_DOMAIN}` (обязателен,
+  без дефолта), `tls {$ACME_EMAIL:internal}` (единственная переключаемая
+  часть);
+- `deploy/.env` — `CONTROL_PLANE_DOMAIN` заполнен плейсхолдером
+  `change-me.example-or-ip` вместо `""` (обязателен всегда: домен для ACME
+  ИЛИ IP VPS для `tls internal`); `ACME_EMAIL` остаётся закомментированным
+  по умолчанию (self-signed) и раскомментируется вместе с заменой домена
+  на реальный для Let's Encrypt.
+
+Последствия:
+
+- в отличие от ACME-пути (Decision 039, не проверен вживую — нужен
+  публичный DNS), путь `tls internal` полностью проверен вживую в этой
+  сессии на локальном Docker — можно деплоить на VPS без домена уже сейчас
+  (`CONTROL_PLANE_DOMAIN=<IP VPS>` в `deploy/.env`), браузер покажет
+  предупреждение о самоподписанном сертификате при первом заходе — ожидаемо;
+- тестовые артефакты (`deploy_postgres_data`, `deploy_caddy_data`,
+  `deploy_caddy_config`, контейнеры) после проверки удалены из локального
+  Docker, `deploy/.env` возвращён к плейсхолдеру `change-me.example-or-ip` —
+  ничего от этой сессии не осталось висеть на машине;
+- общий урок: даже "должно быть очевидно, что заработает" TLS-конфиги стоит
+  реально поднимать и `curl`/`openssl s_client`, а не полагаться на то, что
+  `caddy adapt` не ругается — оба найденных бага прошли бы валидацию схемы
+  молча.
+
+## Decision 041: TLS-фикс реально задеплоен на боевой VPS — нашли и закрыли ещё один баг (default_sni)
+
+Дата: `2026-07-10`
+
+Тема: продолжение [[Decision 039]]/[[Decision 040]] — пользователь
+подтвердил, что VPS из `deploy/ssh.env` (`57.128.220.83`) реально
+существует и одновременно совмещает две роли: control-plane (`backend`/
+`frontend`/`postgres`, уже был развёрнут старой версией `compose.prod.yaml`
+без caddy — то есть жил ровно в той уязвимой конфигурации, которую чинит
+Decision 039) и одна из трёх xray-нод VPN-транспорта (`simple-dimple-xray-
+fr-test-1`, отдельно `de-test-1`/`nl-test-1` на портах `8443-8445`, не
+через `compose.prod.yaml`). Попросил выкатить TLS-фикс именно туда.
+
+Прогнал `manual-deploy.sh` (вручную теми же шагами, `sshpass` вместо
+интерактивного пароля — на машине не было ssh-ключа для этого VPS) —
+`CONTROL_PLANE_DOMAIN="57.128.220.83"` в `deploy/.env`, ACME_EMAIL
+закомментирован (`tls internal`, самоподписанный, без домена).
+
+Миграции прогнались (1 новая — `20260709160000_connection_state_per_user`,
+БД была жива и непустая), `up --build -d` поднял `caddy`+пересобранные
+`backend`/`frontend`. Порты подтверждены: `caddy` — единственный с `80`/
+`443` наружу, `backend`/`frontend` — без host-портов вообще, xray-ноды не
+затронуты (те же 3 контейнера на `8443-8445`, отдельные от
+`compose.prod.yaml`).
+
+**Нашёл третий реальный баг живым тестом** (`curl https://57.128.220.83/`
+после деплоя — `internal error` TLS alert, при том что `openssl s_client
+-servername 57.128.220.83` тот же хост отдавал сертификат нормально):
+клиенты (curl, браузеры) не отправляют SNI в ClientHello при подключении к
+голому IP — SNI (RFC 6066) определён для доменных имён, не для
+IP-литералов. Без SNI Caddy не может сопоставить соединение с сайт-блоком
+`{$CONTROL_PLANE_DOMAIN}` и роняет handshake на КАЖДОМ запросе по IP — то
+есть путь `tls internal` из Decision 040, "проверенный вживую", на самом
+деле был проверен только через `openssl -servername` с явным SNI, а не
+через реальный curl/браузер по IP, и был сломан для собственного главного
+сценария (доступ без домена, по IP). С доменом (не IP) эта проблема не
+возникала бы — клиенты всегда шлют SNI для имён.
+
+Решение: добавлен глобальный блок `default_sni {$CONTROL_PLANE_DOMAIN}` в
+`deploy/Caddyfile` — Caddy отдаёт тот же сертификат и для соединений без
+SNI (обычный случай для IP), и для явного SNI, совпадающего с доменом.
+
+Проверка вживую (сначала локальным Docker, потом на самом VPS после
+редеплоя только `caddy`):
+
+- `curl -sk https://57.128.220.83/` → `200` (и с локальной машины, и с
+  самого VPS через ssh, и снаружи из песочницы);
+- `curl -sk https://57.128.220.83/api/session` → `401` (тот же живой
+  сигнал, что и в Decision 027/033/040);
+- `http://57.128.220.83:8080/` — connection refused;
+- `http://57.128.220.83/` → `308` redirect на https.
+
+Последствия:
+
+- **TLS-фикс реально стоит на боевом VPS прямо сейчас** — не только
+  описан в коде, задеплоен и подтверждён живым curl'ом снаружи;
+- урок для будущих live-проверок: "проверено вживую" через `openssl
+  s_client -servername X` — не то же самое, что "проверено вживую" через
+  обычный клиентский путь (`curl https://<IP>/` без указания servername).
+  На IP-адресах это разные тестовые сценарии с разным исходом;
+- ACME/Let's Encrypt-путь (реальный домен вместо IP) по-прежнему не
+  проверен вживую — там SNI отправляется штатно любым клиентом, риск
+  `default_sni`-бага не касается, но сам ACME HTTP-01 challenge всё ещё не
+  прогонялся ни разу.
+
+## Decision 042: обнаружен и закрыт второй незащищённый control-plane (VPS2, Contabo)
+
+Дата: `2026-07-10`
+
+Тема: после деплоя TLS-фикса на VPS1 ([[Decision 041]]) пользователь
+напомнил про второй известный IP — `167.86.77.100` (Contabo,
+`deploy/ssh.env`, lowercase-креды `vps_ip`/`vps_user`/`vps_password`,
+отдельные от основных `VPS_IP`/`VPS_USER`/`VPS_PASSWORD`).
+
+Проверка вживую (`docker ps` по ssh) показала: на этом VPS **тоже** крутится
+полный control-plane (`deploy-backend-1`/`deploy-frontend-1`/`deploy-
+postgres-1`/`deploy-route-reprobe-worker-1`) в той же уязвимой конфигурации
+(голый `:80`/`:8080`), плюс отдельная xray-нода `fr-contabo-1` (`:8446`).
+Не случайность — по [[Decision 033]] этот VPS специально использовали как
+"чистую" цель для проверки `manual-deploy.sh` (на VPS1 backend/frontend уже
+были подняты другим путём раньше в той же сессии) — деплой остался висеть
+и не был учтён отдельно.
+
+Решение: тот же путь, что и на VPS1 — временно переключил
+`CONTROL_PLANE_DOMAIN` в `deploy/.env` на `167.86.77.100`, прогнал
+`manual-deploy.sh`-эквивалент (rsync + migrate + `up --build -d`) вручную
+через `sshpass` (креды из `deploy/ssh.env`, `root`/пароль), вернул
+`CONTROL_PLANE_DOMAIN` обратно на `57.128.220.83` после проверки.
+
+Проверено вживую: `GET https://167.86.77.100/` → `200` (и с самого VPS, и
+снаружи), `/api/session` → `401`, `:8080` недоступен, `:80` → `308`.
+`default_sni`-фикс из [[Decision 041]] сработал сразу — новых багов не
+нашлось. `simple-dimple-xray-fr-contabo-1` не затронут.
+
+Последствия:
+
+- **оба известных VPS с control-plane теперь за TLS** (`57.128.220.83` и
+  `167.86.77.100`), обе БД живы, миграции применены на обеих без потери
+  данных;
+- **известный архитектурный пробел, не закрытый в этом проходе**:
+  `deploy/.env` — один локальный файл на оба хоста, `CONTROL_PLANE_DOMAIN`
+  захардкожен под конкретный VPS и приходится вручную переключать значение
+  перед каждым `manual-deploy.sh` на другой хост (как сделано здесь дважды)
+  — риск деплоя не на тот адрес, если забыть переключить. `deploy/.env`
+  сейчас оставлен со значением `57.128.220.83` (VPS1);
+- нет ясности, останутся ли оба VPS постоянными control-plane или один из
+  них (Contabo) стоит понизить обратно до чистой xray-ноды, как
+  предполагалось в [[Decision 033]] изначально, — вопрос вне TLS-скоупа
+  этого прохода, требует отдельного решения пользователя.
+
+## Decision 043: `manual-deploy.sh` деплоит на все хосты за один запуск
+
+Дата: `2026-07-10`
+
+Тема: продолжение [[Decision 042]] — раз хостов с control-plane уже два и
+второй чуть не остался незамеченным без TLS-фикса, пользователь попросил
+сделать так, чтобы деплой шёл на оба сразу одной командой, а не вручную
+переключать `CONTROL_PLANE_DOMAIN`/хост перед каждым запуском (что я делал
+руками в Decision 041/042).
+
+Решение:
+
+- `deploy/ssh.env` — теперь bash-массив `CP_HOSTS` (`"ip:user:password[:domain]"`
+  на строку) вместо одиночных `VPS_IP`/`VPS_USER`/`VPS_PASSWORD`; добавлен
+  `deploy/ssh.env.example` (коммитится, с плейсхолдерами и описанием
+  формата) — раньше примера для этого файла не было вообще;
+- `deploy/manual-deploy.sh` переписан: читает `CP_HOSTS`, крутит цикл по
+  каждому хосту (rsync + миграции + `up --build -d` + статус), для каждого
+  хоста автоматически подставляет свой `CONTROL_PLANE_DOMAIN` в копию
+  `deploy/.env` перед отправкой (sed по локальному `deploy/.env`-шаблону,
+  сам файл на диске не трогается) — вручную переключать больше не нужно;
+- password-auth (`sshpass`) теперь встроена в сам скрипт как явный путь
+  (раньше это была ручная обвязка поверх скрипта, не входившая в
+  репозиторий) — если пароль в записи хоста пуст, используется обычный
+  ssh-ключ без sshpass;
+- один упавший хост не останавливает деплой остальных (`if ! deploy_to_host`,
+  список упавших хостов выводится в конце, exit code ненулевой) — но
+  сначала проверил на живом bash-скрипте (`/tmp/test-parse.sh`, не в
+  репозитории), что `set -e` действительно не убивает всю цепочку на
+  ошибке одного хоста, прежде чем полагаться на это в реальном скрипте.
+
+Проверка вживую — реальный `./deploy/manual-deploy.sh` без ручной правки
+`deploy/.env`, оба известных VPS в одном запуске:
+
+- VPS1 (`57.128.220.83`) — получил `CONTROL_PLANE_DOMAIN="57.128.220.83"`;
+- VPS2 (`167.86.77.100`) — получил `CONTROL_PLANE_DOMAIN="167.86.77.100"`
+  (не унаследовал значение первого хоста);
+- на обоих: `GET /` → `200`, `/api/session` → `401`, `:8080` недоступен;
+- xray-ноды на обоих хостах (`fr-test-1`/`de-test-1`/`nl-test-1` на VPS1,
+  `fr-contabo-1` на VPS2) не тронуты.
+
+Последствия:
+
+- добавление нового control-plane VPS в будущем — одна строка в
+  `deploy/ssh.env`, без правок скрипта;
+- локальный `deploy/.env` больше не носит "актуальный" `CONTROL_PLANE_DOMAIN"
+  какого-то одного хоста — это просто шаблон для генерации per-host копий
+  (используется как есть только при чисто локальном `docker compose up` на
+  этой машине, не при реальном деплое через `manual-deploy.sh`);
+- не проверено: поведение при частичном сбое (один хост реально недоступен/
+  неверный пароль) — логика "продолжить и вывести список упавших" проверена
+  только на синтетическом тесте, не на реальном отказе внутри
+  `deploy_to_host`.
+
+## Decision 044: закрыт заряженный футган `isAdmin: true` в fallback-аккаунте, добавлена защита от локаута админки, зафиксирован trade-off по хранению токена сессии
+
+Дата: `2026-07-10`
+
+Тема: код-ревью нашёл три смежные проблемы вокруг модели доступа админки —
+не эксплуатируемую сейчас, но опасную конфигурацию по умолчанию, отсутствие
+защиты от снятия последнего админа и незафиксированное решение по месту
+хранения токена сессии на клиенте.
+
+Решение:
+
+- **fallback-аккаунт больше не админ.** `defaultAccount.user.isAdmin` в
+  [backend/src/defaults.ts](../backend/src/defaults.ts) был `true`; этот
+  объект возвращает `cloneDefaultAccount()` для любого запроса без валидной
+  сессии ([backend/src/store/auth.ts](../backend/src/store/auth.ts)). Сейчас
+  это не эксплуатируется, потому что `requireAdminAuthSession`
+  ([backend/src/routes/context.ts](../backend/src/routes/context.ts)) сначала
+  проверяет `auth.isAuthenticated` и только потом `account.user.isAdmin` — но
+  это заряженный футган: один новый роут, проверяющий только `isAdmin`, без
+  проверки `isAuthenticated`, отдаёт анонимному клиенту админку. Поставили
+  `isAdmin: false` с комментарием, объясняющим, почему это должно оставаться
+  так;
+- **защита от локаута админки.** `updateAdmin` в
+  [backend/src/store/admin.ts](../backend/src/store/admin.ts) позволял снять
+  `isAdmin` с последнего оставшегося админа (включая самого себя) — после
+  этого включить админку обратно можно было только руками в БД. Добавлена
+  проверка: если `input.isAdmin === false` и у пользователя сейчас
+  `isAdmin: true`, считаем `prisma.user.count({ where: { isAdmin: true } })` и
+  бросаем `StoreAuthError(409)`, если админ последний;
+- **токен сессии в `localStorage` — сознательный trade-off, не проглядели.**
+  [frontend/src/lib/http.ts](../frontend/src/lib/http.ts) хранит
+  `x-auth-session-id` в `localStorage`, что доступно любому XSS на этом
+  origin. Для PWA без своего бэкенд-рендеринга это стандартный компромисс
+  (httpOnly cookie в чистом SPA/PWA-сетапе даёт меньше гибкости и требует
+  same-site бэкенд); решение — оставить как есть, но зафиксировать явно,
+  а не как немой пробел. Смягчающие факторы уже в проде: TTL сессии
+  (Decision 038), лимит попыток OTP и её best-practice-полагание на строгий
+  CSP/отсутствие произвольного inline JS на фронтенде. Если фронтенд
+  когда-нибудь получит собственный бэкенд-прокси (а не голый SPA на статике),
+  стоит вернуться к httpOnly cookie.
+
+Почему:
+
+- fallback-объект с `isAdmin: true` — риск не в текущем поведении, а в том,
+  что "не эксплуатируется сейчас" держится на дисциплине каждого будущего
+  роута правильно проверять оба поля в правильном порядке; безопасный
+  дефолт снимает этот риск раз и навсегда;
+- локаут админки чинится только прямым доступом к БД — для прод-окружения
+  без dev-доступа к базе это фактически полная потеря управления;
+- решение про localStorage не менялось по существу, но было незафиксировано
+  как осознанный выбор — теперь его видно в истории решений, а не только
+  как открытый вопрос в код-ревью.
+
+Последствия:
+
+- новый роут, ошибочно проверяющий только `account.user.isAdmin` без
+  `auth.isAuthenticated`, больше не превращается в анонимный доступ к
+  админке — он просто ничего не даст анониму;
+- `PATCH` на последнего админа с `isAdmin: false` возвращает `409` вместо
+  тихого успеха;
+- не проверено: юнит-тест на защиту от локаута последнего админа — стоит
+  добавить в [backend/src/store/__tests__](../backend/src/store/__tests__)
+  отдельным пунктом.
+
+## Decision 045: Шаг 2b закрыт — сквозная доставка трафика подтверждена на реальном Android-устройстве, найдены и исправлены 3 реальных бага
+
+Дата: `2026-07-10`
+
+Тема: последний открытый пункт всего `PRIORITY_PLAN.md` — живая проверка
+на настоящем телефоне (не эмуляторе), был ли провал сквозного трафика на
+эмуляторе (Decision 035) ограничением самого эмулятора или реальным багом.
+Установили пересобранный APK на физическое Android-устройство и прогнали
+полный connect-flow против боевого VPS (`57.128.220.83`). Обнаружили и
+закрыли три независимых реальных бага — ни один не был виден на эмуляторе
+или в юнит-тестах.
+
+Решение/находки:
+
+- **Bug 1 — нет абсолютного API URL для native-платформы.** Все `fetch()`
+  в фронтенде ходили по относительным путям (`/api/...`), что работает в
+  браузере (proxy/same-origin), но в Capacitor WebView резолвится в
+  локальный bundle и отдаёт `index.html` вместо JSON на любой запрос.
+  Добавлена `resolveApiUrl()` в
+  [frontend/src/lib/http.ts](../frontend/src/lib/http.ts): на
+  `Capacitor.isNativePlatform()` все запросы уходят на
+  захардкоженный `https://57.128.220.83`, в браузере/PWA — без изменений.
+  Такой же фикс для отдельного прямого `fetch` телеметрии в
+  [frontend/src/lib/network.ts](../frontend/src/lib/network.ts).
+  Захардкоженный native-URL — временное решение для этой стадии; когда
+  появится больше одного публичного control-plane-хоста для клиентов,
+  стоит вынести в конфигурацию сборки, а не в код.
+- **TLS для native-клиента.** Этот VPS работает в режиме `tls internal`
+  (Decision 040) — самоподписанный сертификат, Android его не доверяет по
+  умолчанию. Вместо того чтобы просить пользователя вручную ставить
+  сертификат на телефон, root CA сертификат Caddy (10-летний, стабильный)
+  вшит прямо в APK:
+  [mobile/android/app/src/main/res/raw/caddy_root_ca.crt](../mobile/android/app/src/main/res/raw/caddy_root_ca.crt)
+  + [network_security_config.xml](../mobile/android/app/src/main/res/xml/network_security_config.xml),
+  подключён через `android:networkSecurityConfig` в `AndroidManifest.xml`.
+- **Bug 2 (главный) — `SimpleDimpleVpnService` не регистрировал
+  `libXray.DialerController`.** Без вызова `LibXray.registerDialerController()`
+  / `registerListenerController()` с колбэком, зовущим
+  `VpnService.protect(fd)`, исходящие сокеты самого Xray-core (соединение к
+  реальному VLESS-серверу) перехватывались тем же `tun`-интерфейсом,
+  который они должны были туннелировать — классический self-loop. Это
+  объясняет, почему на эмуляторе (Decision 035) `tun` поднимался и
+  Xray-core логировал `accepted tcp:...`, но сквозной `fetch` не проходил:
+  вероятно, тот единственный успешный лог был случайностью тайминга или
+  другим путём, а не подтверждением рабочего сквозного трафика. Фикс —
+  в [SimpleDimpleVpnService.kt](../mobile/android/app/src/main/java/com/simpledimple/app/SimpleDimpleVpnService.kt)
+  (и синхронно в `mobile/android-skeleton/`, источник истины по README):
+  `protectFd(fd) = protect(fd.toInt())`, регистрация до старта Xray-рантайма.
+  Подтверждено вживую: после фикса на ноде появились реальные входящие TCP
+  с публичного IP телефона (были рейекты по UUID — см. Bug 3 — но сам факт
+  дозвона наружу подтверждён, до фикса не было ни одного пакета ни на одной
+  из 4 нод).
+- **Bug 3 — `deploy/xray/sync-clients.sh` не был живым cron'ом ни на одной
+  ноде.** На Contabo (`167.86.77.100`) cron для этого пула не был
+  установлен вообще. На OVH (`57.128.220.83`) cron существовал, но со
+  времён до перехода на TLS-терминатор дёргал `http://localhost:8080` —
+  порт, который Decision 041 закрыл от прямого доступа; `curl -sf` в
+  скрипте падал молча (bash `set -e` не ловит ошибку внутри
+  `var=$(cmd)`), из-за чего свежесозданные пользователи (включая demo,
+  зарегистрированный сегодня) никогда не попадали в
+  `inbound.settings.clients` реальных Xray-нод. Починено: cron на обоих
+  VPS переставлен на `https://<host>` через рабочую admin-сессию, root CA
+  добавлен в системное доверие обоих хостов (`update-ca-certificates`) —
+  иначе `curl` внутри скрипта не проходит TLS-валидацию себя же. Прогнан
+  вручную на всех 4 нодах (Contabo + 3 co-located OVH), подтверждено:
+  UUID demo-аккаунта появился в `inbound.settings.clients` каждой.
+
+Почему:
+
+- каждый из трёх багов был инфраструктурным/интеграционным, а не логическим
+  — ни один не поймать юнит-тестом или типами, только живым end-to-end
+  прогоном на настоящем устройстве против настоящего сервера; это ровно то,
+  ради чего Шаг 2b стоял в плане отдельным пунктом с явным DoD "реальное
+  устройство", а не эмулятор;
+- Bug 2 был потенциально самым дорогим долгом — без него продукт физически
+  не может выполнить своё центральное обещание ("нажал — подключился") ни
+  на одном реальном телефоне, при этом весь остальной стек (UI, backend,
+  fallback-executor, provisioning) уже выглядел полностью готовым.
+
+Последствия:
+
+- Definition of Done Шага 2 и Шага 3 в `PRIORITY_PLAN.md` теперь закрыты
+  полностью — публичный IP реально меняется, трафик реально идёт через
+  туннель на физическом устройстве, подтверждено через настоящую кнопку
+  "Подключить", не напрямую вызванный executor;
+- **известный technical debt, оставлен сознательно:** demo-аккаунт временно
+  admin на `57.128.220.83` (нужен, чтобы cron `sync-clients.sh` мог читать
+  `/api/admin/vless-clients`), admin-сессия в cron истечёт вместе с
+  auth-сессией (~30 дней от создания). Когда появится отдельный
+  service-аккаунт для этой цели — переключить cron на него и вернуть demo
+  обычные права;
+- захардкоженный `nativeApiBaseUrl` в `http.ts` указывает на один
+  конкретный staging-хост — не проблема сейчас (один control-plane активно
+  используется клиентами), но не забыть вынести в конфигурацию сборки,
+  когда появится второй.
+
+## Decision 046: Шаг 7 (`PRIORITY_PLAN.md`) открыт — аудит показал, что рабочий план `ROADMAP.md, Этап 6` для alerting уже закрыт кодом, написанным до заморозки
+
+Дата: `2026-07-10`
+
+Тема: Шаги 1-6 `PRIORITY_PLAN.md` закрыты, `Шаг 7` разрешает вернуться к
+очереди ops/alerting из `ROADMAP.md, Этап 6` "ровно там, где она сейчас
+описана, не переизобретая её заново". Перед тем как брать новую работу,
+провели аудит: сверили пятипунктовый "рабочий план" этого этапа
+(`ROADMAP.md:216-227`) с реальным кодом.
+
+Находка: весь пятипунктовый план уже реализован — он был написан до того,
+как `PRIORITY_PLAN.md` заморозил alerting-работу, что подтверждает исходную
+мотивацию приоритизации ("ops/alerting-слой уже развит намного дальше, чем
+ядро продукта").
+
+Подтверждено по каждому пункту:
+
+1. **External delivery adapter** —
+   [backend/src/store/ops-alert-delivery.ts](../backend/src/store/ops-alert-delivery.ts)
+   оборачивает общий
+   [backend/src/transport/message-transport.ts](../backend/src/transport/message-transport.ts)
+   (тот же Resend/Telegram transport, что и auth-verification, см. Decision
+   020/022) с идемпотентным ключом `batchId:alertId:recipientContact`;
+   local delivery log (`OpsAlertDelivery`) не сломан.
+2. **Escalation semantics** —
+   [backend/src/store/ops-alert-escalation.ts](../backend/src/store/ops-alert-escalation.ts):
+   `immediate`/`digest`/`none` по severity+status, cooldown
+   (`applyDeliveryCooldownPolicy`), digest cadence
+   (`applyDigestCadencePolicy`) и quiet-window fallback на secondary tier
+   (`applyDigestQuietWindowPolicy`) — все три политики в
+   [ops-alerts.ts](../backend/src/store/ops-alerts.ts).
+3. **Metadata reuse** — digest/immediate сообщения строятся из одного и
+   того же explainable `detail`/metadata через
+   [ops-alert-messages.ts](../backend/src/store/ops-alert-messages.ts);
+   inventory-diagnosis (`failedDimensions`, policy message) уносится
+   наружу без пересборки смысла (см. Decision 024).
+4. **Admin controls** — `PATCH /api/admin/users/:id` переключает
+   `opsAlertDigestEnabled`
+   ([frontend/src/hooks/useAdminUsers.ts:20,100](../frontend/src/hooks/useAdminUsers.ts));
+   manual resend — `POST
+   /api/ops/alerts/:alertId/deliveries/:deliveryId/resend`
+   ([backend/src/routes/ops-alerts.ts:298](../backend/src/routes/ops-alerts.ts))
+   → `resendDelivery()`/`replayDelivery()` в `ops-alerts.ts`, кнопка в
+   [PersistedAlertTile.tsx](../frontend/src/components/ops-screen/PersistedAlertTile.tsx) —
+   весь путь backend→frontend проверен, не только API.
+5. **Verification** — `backend/src/store/__tests__/ops-alerts.test.ts`
+   (24 сценария: cooldown, cadence, quiet window, retry, resend, failure
+   escalation to secondary tier) — часть 268/268 зелёных backend-тестов на
+   момент этого аудита (`npm run test --workspace backend`). Пробел: нет
+   отдельного unit-теста на сам
+   `transport/message-transport.ts` (тестируется только косвенно через
+   моки в `auth.test.ts`/`ops-alerts.test.ts`) — не блокер, но стоит
+   закрыть, если transport-слой усложнится.
+
+Что не сделано и остаётся открытым (это не код, а решение из
+"Ближайшая очередь", `ROADMAP.md:193-195`):
+
+- не решено, стоит ли выносить часть ops-наблюдения в отдельный
+  специализированный surface — текущий `Ops`-экран пока справляется
+  (после разбиения на секции, см. `CHANGELOG.md, 2026-07-10`), явного
+  триггера "раздуть в отдельный dashboard" не появилось;
+- живая проверка реальной доставки во внешний Telegram/email (не только
+  через unit-тесты с моками) не проводилась — `RESEND_API_KEY`/
+  `OPS_ALERT_TELEGRAM_BOT_TOKEN` не сконфигурированы ни на одном из двух
+  боевых VPS на момент этого аудита.
+
+Итог: `Шаг 7` не требует нового кода прямо сейчас — очередь `Этап 6`
+закрыта, зафиксировано документально. Следующая реальная работа по
+alerting — либо решение про отдельный surface (по явному сигналу, не
+превентивно), либо живая проверка внешней доставки, если это станет
+приоритетом.
+
+## Decision 047: порог `inventory-policy.ts` снижен с 3 до 2 независимых failure domains — бюджетное ограничение, третий VPS не берём
+
+Дата: `2026-07-10`
+
+Тема: `ROADMAP.md, Этап 7` ("Независимые server pools") требует минимум 3
+независимых провайдера. Реально в парке сейчас 2 живых физически разных
+VPS у разных провайдеров (OVH `57.128.220.83`, Contabo `167.86.77.100`, см.
+Decision 030) плюс 2 fake-лейбла (`Germany Test Node`/`Netherlands Test
+Node`) на том же OVH-хосте, что и `France Test Node` — они существовали
+только для того, чтобы формально проходить `MINIMUM_INDEPENDENT_FAILURE_DOMAINS
+= 3` в [inventory-policy.ts](../backend/src/inventory-policy.ts) (см. известный
+пробел в `PRIORITY_PLAN.md`, Шаг 2а).
+
+Решение (явный запрос со стороны продукта, бюджет ограничен): третий
+реальный VPS у отдельного провайдера сейчас не поднимаем. Вместо того чтобы
+держать fake-лейблы ради прохождения policy, снижаем сам порог до 2 и
+убираем нечестные записи из инвентаря.
+
+Что сделали:
+
+- `MINIMUM_INDEPENDENT_FAILURE_DOMAINS` в
+  [inventory-policy.ts:3](../backend/src/inventory-policy.ts) — `3` → `2`;
+  `riskLevel`/`failedDimensions`/`policyViolationMessage` пересчитываются от
+  той же константы, отдельных изменений в логике не потребовалось;
+- обновлены тесты
+  ([inventory-policy.test.ts](../backend/src/__tests__/inventory-policy.test.ts),
+  [endpoints.test.ts](../backend/src/store/__tests__/endpoints.test.ts),
+  [route-decision-ops.test.ts](../backend/src/store/__tests__/route-decision-ops.test.ts)):
+  добавлен явный тест "2 независимых домена = compliant", остальные
+  перечислены под новым порогом; `npm run test --workspace backend`
+  (269/269), `npm run typecheck --workspace backend` — зелёные;
+- retire двух fake-нод (`Germany Test Node`, `Netherlands Test Node`) —
+  оставлено за оператором проекта через Ops UI (`Retire` на карточке ноды),
+  не автоматизировано в рамках этого решения.
+
+**Обновление (2026-07-10, тот же день): доведено до конца вживую на боевых
+VPS.**
+
+- `deploy/manual-deploy.sh` прогнан на оба хоста (OVH `57.128.220.83`,
+  Contabo `167.86.77.100`) — новый порог `2` реально выкачен на прод
+  (`GET /` → `200`, `GET /api/session` → `401` на обоих после деплоя, тот же
+  живой сигнал, что и в прошлых деплоях);
+- **fake-ноды не просто retired, а физически удалены** из `Endpoint` через
+  прямой `DELETE FROM "Endpoint" WHERE id IN (...)` в psql на OVH-хосте — это
+  были тестовые записи без единого реального сервера позади, soft-delete
+  (`isActive=false`/`retiredAt`) для них избыточен. Все FK на `Endpoint`
+  (`EndpointTransportConfig`, `ProbeReport`, `UserEndpointAssignment` и
+  т.д.) — `onDelete: Cascade`/`SetNull` в схеме, `DELETE` прошёл без
+  нарушения ссылочной целостности;
+- живой инвентарь на момент закрытия — ровно 2 честные записи: `France OVH
+  Node` (`85b210ba-...`, OVH, `57.128.220.83`, лейбл переименован — убран
+  устаревший хвост `[TEST: co-located on single VPS, ...]`, который вводил в
+  заблуждение после того, как co-location больше не существует) и `Contabo
+  France Real Node` (`0a68c2bf-...`, Contabo, `167.86.77.100`);
+- важный порядок операций, который стоит запомнить на будущее: **сначала
+  задеплоить код с новым порогом, потом уже удалять ноды** — если бы DELETE
+  прошёл раньше деплоя, старый backend (порог `3`) увидел бы 2 активных
+  endpoint'а и включил fail-closed policy на **всех** `session`/`connect`/
+  `resolve` запросах у реальных пользователей, не только в Ops UI. Ops UI на
+  момент диагностики выглядел "не отзывающимся" на retire Germany Test Node
+  именно по этой причине — не баг фронтенда, а корректная работа
+  fail-closed guard (`evaluateEndpointRetirement()`) на ещё не обновлённом
+  бэкенде.
+
+Trade-off, зафиксированный сознательно:
+
+- отказоустойчивость реально ниже, чем было бы с 3 провайдерами — потеря
+  одного из двух провайдеров теперь означает потерю **половины**
+  независимых failure domains, а не трети. Это принятый компромисс ради
+  бюджета, не техническая случайность;
+- `ROADMAP.md, Этап 7` ("Независимые server pools", цель — 3 провайдера)
+  формально не достигнут этим решением — текущий инвентарь работает по
+  сниженному порогу `2`, а не по изначальной цели этапа. Когда бюджет
+  позволит третий VPS, стоит вернуть порог к `3` и заново пройти Этап 7 по
+  первоначальной цели, а не считать его закрытым сейчас.
+
+## Decision 048: Этап 8 (`ROADMAP.md`) закрыт — клиент больше не теряет telemetry-отчёты при неудачной отправке
+
+Дата: `2026-07-10`
+
+Тема: перед тем как переходить к следующему этапу после закрытия Этапа 7
+(Decision 047), сверили `ROADMAP.md, Этап 8` с кодом — та же практика, что
+и аудит alerting-слоя (Decision 046). В отличие от Этапов 6/9, у Этапа 8 не
+было секции "Текущий прогресс", что оказалось симптомом реального пробела,
+а не просто недосмотра в документации.
+
+Находка: 3 из 4 пунктов цели уже выполнены (минимальный probe report,
+только грубая network metadata, клиентский IP никогда не собирался). Один
+пункт — явно не выполнен: "если отправка telemetry не удалась, клиент
+кеширует отчёт локально и отправляет позже". Оба места отправки —
+`submitProbeReport()` в
+[frontend/src/lib/network.ts](../frontend/src/lib/network.ts) и
+`reportCandidateFailure()` в
+[frontend/src/hooks/useRouteSession.ts](../frontend/src/hooks/useRouteSession.ts) —
+молча теряли отчёт в `catch`-блоке (`// best-effort telemetry`) при любом
+сетевом сбое или не-`ok` ответе.
+
+Что сделали:
+
+- новый модуль
+  [frontend/src/lib/telemetryQueue.ts](../frontend/src/lib/telemetryQueue.ts):
+  `enqueueTelemetryReport(url, body, headers)` кладёт неотправленный отчёт в
+  `localStorage` (ключ `simple-dimple.telemetry-queue-v1`, кап 20 записей —
+  самые старые вытесняются первыми, чтобы не расти неограниченно при долгом
+  offline); `flushTelemetryQueue()` пытается досослать каждую запись, убирает
+  из очереди только те, что реально дошли (`response.ok`);
+- `submitProbeReport()` и `reportCandidateFailure()` теперь строят
+  URL/headers/body сами (вместо `readJson`/голого `fetch` без доступа к
+  этим частям после сборки) и вызывают `enqueueTelemetryReport()` в `catch`
+  и при `!response.ok`, вместо того чтобы просто проглатывать ошибку;
+- `flushTelemetryQueue()` вызывается один раз при старте приложения
+  ([App.tsx](../frontend/src/App.tsx)) — накопленные за время offline
+  отчёты досылаются при следующем открытии PWA;
+- 5 unit-тестов
+  ([telemetryQueue.test.ts](../frontend/src/lib/__tests__/telemetryQueue.test.ts)):
+  пустая очередь, успешная досылка убирает запись и не шлёт её повторно,
+  неудачная (не-`ok` и сетевой throw) — оставляет и повторяет на следующем
+  flush, кап очереди на 20 записей проверен явно (30 enqueue → 20 fetch).
+
+Проверено: `npm run test --workspace frontend` (11/11, было 6/6 до этого
+изменения), `npm run check --workspace frontend`, `npm run lint` (весь
+репозиторий) — зелёные. Живая проверка в браузере не проводилась — это
+фоновая логика без визуального UI-изменения, наблюдать нечего; поведение
+подтверждено через unit-тесты с мокнутым `fetch`/`localStorage`, не через
+реальный offline-сценарий на устройстве.
+
+Итог: `ROADMAP.md, Этап 8` закрыт полностью — все 4 пункта цели выполнены.
+
+## Decision 049: UI/UX — Ops убран из главного экрана обычного пользователя, "нативный" touch-feel через CSS, статус-бар под тему приложения на Android
+
+Дата: `2026-07-10`
+
+Тема: пока iOS-упаковка на паузе (нет полного Xcode.app на машине —
+см. предыдущее обсуждение в сессии, не отдельный Decision), переключились
+на UI/UX-полировку PWA/Android-обвязки. Два конкретных запроса: (1) в
+приложении есть лишние элементы для обычного пользователя, пример — Ops;
+(2) упакованное приложение визуально ощущается как браузерная страница, а
+не нативный экран — можно ли это исправить без переписывания на нативный
+стек (Go и т.п.).
+
+Решение по (2): да, без переписывания — то, что WebView-приложение
+"ощущается как сайт", лечится на уровне CSS/веб-слоя и Capacitor native
+plugins, не требует другого стека.
+
+Что сделали:
+
+1. **Ops у обычного пользователя** —
+   [HomeScreen.tsx:75-91](../frontend/src/components/HomeScreen.tsx) —
+   кнопка `Ops` вела себя не так, как `Admin`: `Admin` вообще не рендерился
+   для не-админа, а `Ops` рендерился всегда и просто дизейблился
+   (`disabled={... || !isAdmin}`). Приведено к одинаковому поведению — `Ops`
+   теперь тоже не рендерится для не-админа, а не просто недоступен.
+2. **Touch-feel** — [styles.css](../frontend/src/styles.css),
+   [index.html](../frontend/index.html):
+   - `touch-action: manipulation` + `-webkit-tap-highlight-color: transparent`
+     на кнопках — убирает 300ms tap-delay и WebView-подсветку тапа
+     ("кнопка как ссылка на сайте");
+   - `:active { transform: scale(0.96) }` — press-feedback, которого не было
+     вообще (кнопки были полностью статичными);
+   - `overscroll-behavior: none` на `html`/`body` — без браузерного chrome
+     "резиновый" bounce-скролл в упакованном приложении читается как явный
+     признак веб-страницы;
+   - `user-select: none` на кнопках — иначе долгий тап выделяет текст;
+   - safe-area-инсеты (`env(safe-area-inset-*)` на `.shell` +
+     `viewport-fit=cover` в `index.html`) — контент уважает чёлку/home-indicator
+     на реальном устройстве.
+3. **Нативный цвет статус-бара (Android)** — установлен
+   `@capacitor/status-bar@7.0.6` (версия под уже стоящий
+   `@capacitor/core@7.6.7`, latest 8.x несовместим — та же ловушка, что и с
+   `@capacitor/ios` в этой же сессии) в оба `package.json`
+   (`frontend` — для вызова API, `mobile` — чтобы `cap sync` подтянул
+   нативный Android-код плагина). В [App.tsx](../frontend/src/App.tsx) —
+   `useEffect`, guarded `Capacitor.isNativePlatform()`: `setOverlaysWebView`,
+   `setStyle({ style: Style.Dark })` (светлые иконки — фон тёмный),
+   `setBackgroundColor("#0f172a")` — тот же navy, что и `theme-color` в
+   `index.html`/`connectButton`. No-op в браузере/PWA.
+
+Проверено: `npm run test --workspace frontend` (11/11), `npm run check
+--workspace frontend`, `npm run lint` (весь репозиторий) — зелёные;
+изменения проверены в браузерном превью (desktop + mobile viewport,
+computed styles инспекцией). **APK пересобран** —
+`npx cap sync android` подтянул `@capacitor/status-bar` в нативный
+Android-проект (`[info] Found 1 Capacitor plugin for android:
+@capacitor/status-bar@7.0.6`), `./gradlew :app:assembleDebug` →
+`BUILD SUCCESSFUL`, `app-debug.apk` пересобран (207MB, свежий таймстамп).
+
+**Не проверено вживую:** реальный запуск на устройстве/эмуляторе для этой
+конкретной сборки — видно только `BUILD SUCCESSFUL`, не подтверждено, что
+статус-бар на экране реально выглядит как ожидается (в отличие от Decision
+045, где live-проверка на физическом устройстве уже была). Если APK
+переустановят на то же тестовое устройство — стоит визуально свериться.
 
 ## Правило обновления
 

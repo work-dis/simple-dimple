@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
+import { Capacitor } from "@capacitor/core";
+import { StatusBar, Style } from "@capacitor/status-bar";
 
 import type {
   Screen,
 } from "./types";
 import { AccountScreen, AdminScreen, HomeScreen, OpsScreen, ServerScreen } from "./components";
 import {
+  useAdminEndpoints,
   useAdminUsers,
   useAuthAccount,
   useRouteDecisionOps,
@@ -44,11 +47,37 @@ function App() {
     },
     onError: setError,
   });
+  const adminEndpoints = useAdminEndpoints({
+    onClearError: () => setError(null),
+    onError: setError,
+  });
 
   /* ──────────── Effects ──────────── */
 
   useEffect(() => {
     void authAccount.loadAuthAccount();
+    // Run once on mount only. authAccount is a fresh object every render
+    // (its hook doesn't memoize), so listing it would re-run this on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Этап 8 (ROADMAP.md): probe/feedback-отчёты, не отправленные из-за сбоя сети,
+  // кэшируются локально (telemetryQueue) — досылаем их при следующем запуске.
+  useEffect(() => {
+    void import("./lib/telemetryQueue").then(({ flushTelemetryQueue }) => flushTelemetryQueue());
+  }, []);
+
+  // Нативный цвет статус-бара под тему приложения (#0f172a — тот же navy,
+  // что и theme-color в index.html/connectButton) — иначе статус-бар остаётся
+  // системным дефолтом и упакованное приложение визуально выглядит как
+  // browser tab, а не отдельный native-экран. No-op в браузере/PWA.
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) {
+      return;
+    }
+    void StatusBar.setOverlaysWebView({ overlay: false });
+    void StatusBar.setStyle({ style: Style.Dark });
+    void StatusBar.setBackgroundColor({ color: "#0f172a" });
   }, []);
 
   // Data-plane (/api/session и др.) требует аутентификацию. Грузим сессию только
@@ -62,6 +91,9 @@ function App() {
     } else {
       routeSession.resetSession();
     }
+    // Deliberately keyed on the auth booleans only, not routeSession (unstable
+    // object identity every render) — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authAccount.isAuthenticated, authAccount.isLoading]);
 
   useEffect(() => {
@@ -74,6 +106,10 @@ function App() {
     }
 
     void routeDecisionOps.loadRouteDecisionOps();
+    void adminEndpoints.loadAdminEndpoints();
+    // Deliberately keyed on screen + auth booleans only, not routeDecisionOps/
+    // adminEndpoints (unstable object identity every render) — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, authAccount.isAuthenticated, authAccount.isAdmin]);
 
   useEffect(() => {
@@ -85,6 +121,9 @@ function App() {
       return;
     }
     void adminUsers.loadAdminUsers();
+    // Deliberately keyed on screen + auth booleans only, not adminUsers
+    // (unstable object identity every render) — see comment above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [screen, authAccount.isAuthenticated, authAccount.isAdmin]);
 
   async function changeServer(serverId: string) {
@@ -100,6 +139,7 @@ function App() {
     routeSession.isSubmitting ||
     authAccount.isSubmitting ||
     adminUsers.isSubmitting ||
+    adminEndpoints.isSubmitting ||
     routeDecisionOps.isLoading;
 
   const showBack =
@@ -137,7 +177,7 @@ function App() {
           <HomeScreen
             session={routeSession.session}
             activeServer={routeSession.activeServer}
-            routePolicy={routeSession.routePolicy}
+            currentAssignment={routeSession.currentAssignment}
             authIsAuthenticated={authAccount.isAuthenticated}
             isAdmin={authAccount.isAdmin}
             isLoading={isLoading}
@@ -151,10 +191,7 @@ function App() {
           <ServerScreen
             session={routeSession.session}
             servers={routeSession.servers}
-            activeServer={routeSession.activeServer}
-            currentAssignment={routeSession.currentAssignment}
             routePolicy={routeSession.routePolicy}
-            routeHealth={routeSession.routeHealth}
             isSubmitting={isSubmitting}
             onChangeServer={changeServer}
           />
@@ -182,6 +219,7 @@ function App() {
             opsAlerts={routeDecisionOps.opsAlerts}
             opsAlertEscalationPreviews={routeDecisionOps.opsAlertEscalationPreviews}
             opsAlertDeliveries={routeDecisionOps.opsAlertDeliveries}
+            adminEndpoints={adminEndpoints.adminEndpoints}
             isSubmitting={isSubmitting}
             onReload={routeDecisionOps.loadRouteDecisionOps}
             onAcknowledgeAlert={routeDecisionOps.acknowledgeOpsAlert}
@@ -193,6 +231,9 @@ function App() {
             onRetryAlertDelivery={routeDecisionOps.retryOpsAlertDelivery}
             onResendAlertDelivery={routeDecisionOps.resendOpsAlertDelivery}
             onDeliverAlertDigest={routeDecisionOps.deliverOpsAlertDigest}
+            onRetireEndpoint={adminEndpoints.retireEndpoint}
+            onReactivateEndpoint={adminEndpoints.reactivateEndpoint}
+            onReloadEndpoints={adminEndpoints.loadAdminEndpoints}
           />
         )}
 

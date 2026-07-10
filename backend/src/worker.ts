@@ -3,12 +3,18 @@ import "dotenv/config";
 import { createRouteReprobeWorker } from "./route-reprobe.js";
 import { createEndpointHealthCheckWorker } from "./endpoint-healthcheck-worker.js";
 import { createBackendRuntime } from "./runtime.js";
+import { defaultAuthSession } from "./defaults.js";
 
 const runtime = createBackendRuntime(process.env.DATABASE_URL);
 
+// Reprobe-джобы (`POST /api/ops/route-reprobe-jobs`) — это системные/сетевые
+// проверки по контексту (networkType/asn/...), а не задачи конкретного юзера.
+// Раньше воркер брал "последнего залогинившегося юзера глобально" (readState()),
+// из-за чего телеметрия ошибочно приписывалась случайному юзеру. Правильно —
+// анонимный auth: resolveRouteDecision уже null-safe по auth.userId.
 const worker = createRouteReprobeWorker({
-  auth: runtime.loadAuth,
-  resolveRouteDecision: runtime.resolveRouteDecisionForActiveAuth,
+  auth: () => defaultAuthSession,
+  resolveRouteDecision: (input) => runtime.resolveRouteDecision(defaultAuthSession, input),
   recordRouteFeedback: runtime.store.recordRouteFeedback,
   recordRouteWorkflowSnapshot: runtime.store.recordRouteWorkflowSnapshot,
   refreshOpsAlerts: runtime.store.refreshOpsAlerts,

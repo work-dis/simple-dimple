@@ -1,0 +1,24 @@
+---
+# Default pool of decoy SNIs/fingerprints for REALITY — mirrors the pool in
+# deploy/xray/provision-node.sh (Шаг 6, docs/PRIORITY_PLAN.md). Deliberately
+# small; extend here if the fleet grows past a handful of nodes.
+xray_sni_pool:
+  - "www.microsoft.com"
+  - "www.cloudflare.com"
+  - "www.amazon.com"
+  - "www.wikipedia.org"
+
+xray_fingerprint_pool:
+  - "chrome"
+  - "firefox"
+  - "safari"
+
+xray_port: 8443
+xray_priority: 50
+xray_protocol: "vless"
+xray_transport_profile: "reality-tcp"
+xray_flow: "xtls-rprx-vision"
+
+# Set to "absent" to retire the endpoint instead of provisioning it (see
+# retire-node.yml, which sets this via -e).
+xray_state: present

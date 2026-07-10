@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RouteReprobeJob } from "../../generated/prisma/client.js";
-import { buildRouteDecisionOpsSummary } from "../admin.js";
+import { buildRouteDecisionOpsSummary } from "../route-decision-ops.js";
 import { detectOpsAlertsFromSummary } from "../ops-alert-detector.js";
 
 type OpsEvent = Parameters<typeof buildRouteDecisionOpsSummary>[0]["routeEvents"][number];
@@ -323,7 +323,7 @@ describe("buildRouteDecisionOpsSummary", () => {
         distinctPools: 3,
         distinctRegions: 3,
         largestRegionalDomainSize: 1,
-        minimumRecommendedFailureDomains: 3,
+        minimumRecommendedFailureDomains: 2,
         failedDimensions: [],
         policyViolationMessage: null,
       },
@@ -568,16 +568,16 @@ describe("buildRouteDecisionOpsSummary", () => {
       distinctPools: 1,
       distinctRegions: 1,
       largestRegionalDomainSize: 1,
-      minimumRecommendedFailureDomains: 3,
-      failedDimensions: ["active endpoints 1/3", "providers 1/3", "ASNs 1/3", "regions 1/3"],
+      minimumRecommendedFailureDomains: 2,
+      failedDimensions: ["active endpoints 1/2", "providers 1/2", "ASNs 1/2", "regions 1/2"],
       policyViolationMessage:
-        "Active inventory must keep at least 3 independent failure domains across provider/ASN/region; got active endpoints 1/3, providers 1/3, ASNs 1/3, regions 1/3.",
+        "Active inventory must keep at least 2 independent failure domains across provider/ASN/region; got active endpoints 1/2, providers 1/2, ASNs 1/2, regions 1/2.",
     });
     expect(detectOpsAlertsFromSummary(summary)).toContainEqual(
       expect.objectContaining({
         id: "inventory-failure-domain-risk",
         detail:
-          "Active inventory must keep at least 3 independent failure domains across provider/ASN/region; got active endpoints 1/3, providers 1/3, ASNs 1/3, regions 1/3."
+          "Active inventory must keep at least 2 independent failure domains across provider/ASN/region; got active endpoints 1/2, providers 1/2, ASNs 1/2, regions 1/2."
       })
     );
   });

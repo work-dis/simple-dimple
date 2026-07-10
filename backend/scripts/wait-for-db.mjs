@@ -25,7 +25,7 @@ while (Date.now() < deadline) {
     await client.end();
     console.log("Database is ready.");
     process.exit(0);
-  } catch (error) {
+  } catch {
     await client.end().catch(() => undefined);
     await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
   }

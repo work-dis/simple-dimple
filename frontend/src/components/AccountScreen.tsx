@@ -173,11 +173,12 @@ export function AccountScreen({
           </div>
 
           <div className="accountActions">
-            <button className="secondaryButton" disabled={isLoading || isSubmitting}>
+            {/* Read-only статус — нет backend-эндпоинта для переключения autoRenew, поэтому не <button> */}
+            <span className="secondaryButton statusBadge">
               {account?.subscription.autoRenew
                 ? "Автопродление включено"
                 : "Автопродление выключено"}
-            </button>
+            </span>
             <button
               className="ghostButton fullWidth"
               onClick={onLogout}

@@ -29,25 +29,48 @@ export function createEndpointHealthCheckStore(prisma: PrismaClient) {
     async applyHealthCheckResult(result: EndpointHealthCheckResult): Promise<void> {
       const endpoint = await prisma.endpoint.findUnique({
         where: { id: result.endpointId },
-        select: { isActive: true, consecutiveHealthFailures: true }
+        select: { isActive: true, consecutiveHealthFailures: true, retiredReason: true }
       });
 
       if (!endpoint) {
         return;
       }
 
+      // Администратор явно вывел эту ноду из ротации (Ops "Retire") —
+      // успешный пинг не должен молча возвращать её в строй за его спиной.
+      // Метрики всё равно обновляем, чтобы в Ops было видно "уже отвечает,
+      // можно реактивировать вручную", но isActive/retiredAt/retiredReason
+      // не трогаем.
+      const isManuallyRetired = !endpoint.isActive && endpoint.retiredReason === "manual";
+
       if (result.ok) {
         await prisma.endpoint.update({
           where: { id: result.endpointId },
           data: {
-            isActive: true,
+            isActive: isManuallyRetired ? false : true,
             lastHealthCheckAt: new Date(),
             lastHealthCheckOk: true,
             lastHealthCheckLatencyMs: result.latencyMs,
-            consecutiveHealthFailures: 0,
+            consecutiveHealthFailures: isManuallyRetired ? endpoint.consecutiveHealthFailures : 0,
+            ...(isManuallyRetired ? {} : { retiredAt: null, retiredReason: null }),
             // measured latency drives both display and the baseline (no-ranking-yet)
             // ordering in listServers(), so the fastest reachable endpoint wins by default
             ...(typeof result.latencyMs === "number" ? { latencyMs: result.latencyMs } : {})
+          }
+        });
+        return;
+      }
+
+      if (isManuallyRetired) {
+        // Уже вне ротации по решению администратора — не нужно наращивать
+        // failure streak или трогать retire-аудит из-за того, что нода (и
+        // так выключенная) не отвечает.
+        await prisma.endpoint.update({
+          where: { id: result.endpointId },
+          data: {
+            lastHealthCheckAt: new Date(),
+            lastHealthCheckOk: false,
+            lastHealthCheckLatencyMs: null
           }
         });
         return;
@@ -63,7 +86,10 @@ export function createEndpointHealthCheckStore(prisma: PrismaClient) {
           lastHealthCheckAt: new Date(),
           lastHealthCheckOk: false,
           lastHealthCheckLatencyMs: null,
-          consecutiveHealthFailures: nextFailureCount
+          consecutiveHealthFailures: nextFailureCount,
+          ...(shouldDeactivate && endpoint.isActive
+            ? { retiredAt: new Date(), retiredReason: "auto_health_failure" }
+            : {})
         }
       });
 

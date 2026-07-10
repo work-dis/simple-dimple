@@ -1,28 +1,23 @@
-import { createHash, randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
 import { promisify } from "node:util";
 
 import {
   defaultAccount,
   defaultAuthSession,
-  defaultServerPools,
   serverOptions
 } from "../defaults.js";
-import { ContactType, SubscriptionStatus, UserStatus, AuthProvider, AuthSessionStatus } from "../generated/prisma/client.js";
+import { AuthProvider, AuthSessionStatus } from "../generated/prisma/client.js";
 import type {
   AccountSummary,
   AdminUserSummary,
   AuthSessionSummary,
   EndpointAssignmentSummary,
   LastKnownGoodRouteSummary,
-  RouteDecisionOpsEndpointSummary,
-  RouteDecisionOpsEventSummary,
-  RouteDecisionOpsNetworkSummary,
   RouteHealthSnapshotSummary,
   ServerOption,
   SessionState,
   TelemetryFailureReason,
   TelemetryNetworkContext,
-  TelemetryProbeResult,
   VerificationChallengeProvider
 } from "../types.js";
 
@@ -30,7 +25,7 @@ import type {
 // Errors
 // --------------------------------------------------------------------------
 
-export class StoreAuthError extends Error {
+export class StoreError extends Error {
   statusCode: number;
 
   constructor(message: string, statusCode: number) {
@@ -406,10 +401,6 @@ export function normalizeVerificationTarget(provider: VerificationChallengeProvi
   }
 
   return trimmedTarget.startsWith("@") ? trimmedTarget : `@${trimmedTarget}`;
-}
-
-export function providerToContactType(provider: VerificationChallengeProvider) {
-  return provider === "email" ? ContactType.email : ContactType.telegram;
 }
 
 // --------------------------------------------------------------------------

@@ -2,6 +2,7 @@
   "name": "simple-dimple",
   "private": true,
   "version": "0.1.0",
+  "type": "module",
   "workspaces": [
     "backend",
     "frontend"
@@ -19,9 +20,14 @@
     "build": "npm run build --workspace backend && npm run build --workspace frontend",
     "check": "npm run check --workspace backend && npm run check --workspace frontend",
     "ci:check": "npm run check:ci --workspace backend && npm run check --workspace frontend",
-    "ci:build": "npm run build:ci --workspace backend && npm run build --workspace frontend"
+    "ci:build": "npm run build:ci --workspace backend && npm run build --workspace frontend",
+    "lint": "eslint ."
   },
   "devDependencies": {
-    "concurrently": "^9.2.0"
+    "concurrently": "^9.2.0",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^15.15.0",
+    "typescript-eslint": "^8.63.0"
   }
 }

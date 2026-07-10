@@ -183,12 +183,6 @@ export type AuthSessionSummary = {
   expiresAt: string | null;
 };
 
-export type PersistedState = {
-  auth: AuthSessionSummary;
-  session: SessionState;
-  account: AccountSummary;
-};
-
 export type UpdateAccountProfileBody = {
   displayName?: string;
   contact?: string;
@@ -199,6 +193,81 @@ export type UpdateUserAdminBody = {
   opsAlertImmediateEnabled?: boolean;
   opsAlertDigestEnabled?: boolean;
   opsAlertEscalationTier?: OpsAlertEscalationTier;
+};
+
+// Шаг 5 (PRIORITY_PLAN.md) — fleet provisioning для Xray-нод. Отдельно от
+// AdminUserSummary/UpdateUserAdminBody выше (те про users, эти — про
+// endpoint-инвентарь).
+export type AdminEndpointTransportSummary = {
+  port: number;
+  sni: string;
+  fingerprint: string;
+  flow: string;
+  shortId: string;
+};
+
+export type AdminEndpointSummary = {
+  id: string;
+  label: string;
+  provider: string;
+  asn: number | null;
+  countryCode: string;
+  city: string | null;
+  poolCode: string;
+  region: string | null;
+  ipAddress: string;
+  protocol: string;
+  transportProfile: string;
+  latencyMs: number;
+  loadPercent: number;
+  isActive: boolean;
+  lastHealthCheckAt: string | null;
+  lastHealthCheckOk: boolean | null;
+  consecutiveHealthFailures: number;
+  retiredAt: string | null;
+  retiredReason: string | null;
+  transport: AdminEndpointTransportSummary | null;
+  createdAt: string;
+};
+
+export type RegisterAdminEndpointBody = {
+  label?: string;
+  ipAddress?: string;
+  provider?: string;
+  asn?: number;
+  countryCode?: string;
+  city?: string;
+  poolCode?: string;
+  region?: string;
+  priority?: number;
+  protocol?: string;
+  transportProfile?: string;
+  latencyMs?: number;
+  loadPercent?: number;
+  port?: number;
+  publicKey?: string;
+  shortId?: string;
+  sni?: string;
+  fingerprint?: string;
+  flow?: string;
+};
+
+export type SetAdminEndpointActiveBody = {
+  isActive?: boolean;
+  // Только для isActive:false — свободный текст для аудита ("provider
+  // decommissioned the box", "swapping for a Hetzner node" и т.п.).
+  // Дефолт "manual", если не передан. Игнорируется при isActive:true —
+  // реактивация всегда чистит retiredAt/retiredReason.
+  retiredReason?: string;
+};
+
+// Шаг 2 (PRIORITY_PLAN.md) — источник правды для per-node client-list sync
+// (deploy/xray/sync-clients.sh): каждая Xray-нода периодически подтягивает
+// этот список и перекладывает его в inbound.settings.clients, вместо того
+// чтобы держать один захардкоженный client id на весь провижининг.
+export type VlessClientSummary = {
+  uuid: string;
+  flow: string;
 };
 
 export type LoginWithPasswordBody = {
@@ -246,6 +315,17 @@ export type TelemetryNetworkContext = {
 export type ResolveRoutesBody = TelemetryNetworkContext & {
   manualEndpointId?: string;
   includeServers?: boolean;
+};
+
+// Шаг 6 (PRIORITY_PLAN.md) / Decision 024 — bridge-модель: вместо полного
+// inventory клиент получает подмножество (см.
+// backend/src/inventory-segmentation.ts). pinnedEndpointIds не дают continuity
+// сломаться — уже активное подключение, последний известный рабочий маршрут и
+// явно запрошенный manualEndpointId всегда остаются видимыми, даже если их
+// hash-ранг для этого пользователя/периода их бы не выбрал.
+export type ServerSegmentationContext = {
+  subjectId: string;
+  pinnedEndpointIds?: readonly string[];
 };
 
 export type RouteFeedbackResult = "connected" | "unstable" | "failed";
@@ -833,6 +913,29 @@ export type RouteDecisionOpsSummary = {
   endpoints: RouteDecisionOpsEndpointSummary[];
   networks: RouteDecisionOpsNetworkSummary[];
   recentEvents: RouteDecisionOpsEventSummary[];
+};
+
+export type AdminOpsSummary = {
+  users: {
+    total: number;
+    active: number;
+    blocked: number;
+  };
+  subscriptions: {
+    active: number;
+  };
+  connections: {
+    tracked: number;
+    connected: number;
+  };
+  timeWindowMinutes: number;
+  computedAt: string;
+  probeStats?: {
+    total: number;
+    connected: number;
+    failed: number;
+    successRate: number;
+  };
 };
 
 export type TelemetryProbeBody = TelemetryNetworkContext & {

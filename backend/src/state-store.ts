@@ -10,32 +10,20 @@ import { createOpsAlertStore } from "./store/ops-alerts.js";
 import { createOpsAlertDeliveryTransport } from "./store/ops-alert-delivery.js";
 import { createConnectionConfigStore } from "./store/connection-config.js";
 import { createEndpointHealthCheckStore } from "./store/endpoint-healthcheck.js";
+import { createEndpointsStore } from "./store/endpoints.js";
 import { createMessageTransport } from "./transport/message-transport.js";
-import type {
-  AccountSummary,
-  AdminUserSummary,
-  AuthSessionSummary,
-  EndpointAssignmentSummary,
-  LastKnownGoodRouteSummary,
-  LoginWithPasswordBody,
-  PersistedState,
-  RegisterWithPasswordBody,
-  RequestAuthChallengeBody,
-  RouteHealthSnapshotSummary,
-  ServerOption,
-  SessionState,
-  TelemetryNetworkContext,
-  TelemetryProbeResult,
-  VerifyAuthChallengeBody,
-  VerificationChallengeProvider
-} from "./types.js";
 
 // --------------------------------------------------------------------------
 // Orchestrator: creates PrismaClient + composes domain stores
 // --------------------------------------------------------------------------
 
 export function createStateStore(databaseUrl?: string) {
-  const connectionString = databaseUrl ?? process.env.DATABASE_URL ?? "postgresql://simpledimple:change-me@localhost:5432/simple_dimple";
+  const connectionString = databaseUrl ?? process.env.DATABASE_URL;
+
+  if (!connectionString) {
+    throw new Error("DATABASE_URL is not set");
+  }
+
   const prisma = new PrismaClient({
     adapter: new PrismaPg(connectionString)
   });
@@ -47,6 +35,7 @@ export function createStateStore(databaseUrl?: string) {
   const routeReprobeJobs = createRouteReprobeJobStore(prisma);
   const connectionConfig = createConnectionConfigStore(prisma);
   const endpointHealthCheck = createEndpointHealthCheckStore(prisma);
+  const endpoints = createEndpointsStore(prisma);
   const opsAlertDeliveryTransport = createOpsAlertDeliveryTransport();
   const opsAlerts = createOpsAlertStore(prisma, {
     getRouteDecisionOpsSummary: (input) => admin.getRouteDecisionOpsSummary(input ?? {}),
@@ -68,8 +57,8 @@ export function createStateStore(databaseUrl?: string) {
     logout: auth.logout,
 
     // Session
-    readState: session.readState,
-    writeState: session.writeState,
+    readConnectionState: session.readConnectionState,
+    updateAccountProfile: session.updateAccountProfile,
     writeSession: session.writeSession,
     listServers: session.listServers,
     getCurrentAssignment: session.getCurrentAssignment,
@@ -81,6 +70,12 @@ export function createStateStore(databaseUrl?: string) {
     // Endpoint health checks
     listCheckableEndpoints: endpointHealthCheck.listCheckableEndpoints,
     applyHealthCheckResult: endpointHealthCheck.applyHealthCheckResult,
+
+    // Fleet provisioning (Шаг 5, PRIORITY_PLAN.md)
+    listAdminEndpoints: endpoints.listAdminEndpoints,
+    registerEndpoint: endpoints.registerEndpoint,
+    setEndpointActive: endpoints.setEndpointActive,
+    listVlessClients: endpoints.listVlessClients,
 
     // Telemetry
     submitProbeReport: telemetry.submitProbeReport,
