@@ -20,6 +20,8 @@ export type OpsAlertDetectorInput = {
   minimumRecommendedFailureDomains: number;
   inventoryFailedDimensions: string[];
   inventoryPolicyViolationMessage: string | null;
+  staleClientSyncPools: string[];
+  clientSyncThresholdMinutes: number;
 };
 
 export function detectOpsAlerts(input: OpsAlertDetectorInput): RouteDecisionOpsSummary["operationalSummary"]["alerts"] {
@@ -93,6 +95,22 @@ export function detectOpsAlerts(input: OpsAlertDetectorInput): RouteDecisionOpsS
     });
   }
 
+  // Client-list синк умер на ноде (крон сломан/сессия истекла/скрипт не
+  // исполняется) — пользователи, зарегистрированные после последнего живого
+  // синка, получают "VPN подключился, но трафик отвергается" (реальный
+  // инцидент 2026-07-10: бит исполнения sync-clients.sh потерян при деплое,
+  // 20+ часов молчаливых Permission denied в кроне на обоих хостах).
+  if (input.staleClientSyncPools.length > 0) {
+    alerts.push({
+      id: "xray-client-sync-stale",
+      severity: "critical",
+      title: "Xray client-list sync is stale",
+      detail:
+        `Pool(s) ${input.staleClientSyncPools.join(", ")} have not synced their vless client list ` +
+        `for over ${input.clientSyncThresholdMinutes} minute(s) — users registered since the last sync cannot connect.`
+    });
+  }
+
   return alerts;
 }
 
@@ -119,7 +137,9 @@ export function detectOpsAlertsFromSummary(summary: RouteDecisionOpsSummary) {
     largestRegionalDomainSize: summary.operationalSummary.inventoryHealth.largestRegionalDomainSize,
     minimumRecommendedFailureDomains: summary.operationalSummary.inventoryHealth.minimumRecommendedFailureDomains,
     inventoryFailedDimensions: summary.operationalSummary.inventoryHealth.failedDimensions,
-    inventoryPolicyViolationMessage: summary.operationalSummary.inventoryHealth.policyViolationMessage
+    inventoryPolicyViolationMessage: summary.operationalSummary.inventoryHealth.policyViolationMessage,
+    staleClientSyncPools: summary.operationalSummary.clientSync.stalePools,
+    clientSyncThresholdMinutes: summary.operationalSummary.clientSync.thresholdMinutes
   });
 }
 

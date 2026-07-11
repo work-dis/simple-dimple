@@ -76,6 +76,7 @@ export function createStateStore(databaseUrl?: string) {
     registerEndpoint: endpoints.registerEndpoint,
     setEndpointActive: endpoints.setEndpointActive,
     listVlessClients: endpoints.listVlessClients,
+    recordPoolClientsSync: endpoints.recordPoolClientsSync,
 
     // Telemetry
     submitProbeReport: telemetry.submitProbeReport,

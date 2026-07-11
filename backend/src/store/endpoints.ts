@@ -266,6 +266,19 @@ export function createEndpointsStore(prisma: PrismaClient) {
         uuid: user.vlessUuid!,
         flow: "xtls-rprx-vision"
       }));
+    },
+
+    // Хартбит client-list синка: sync-clients.sh передаёт ?pool=<code> при
+    // каждом чтении /api/admin/vless-clients. Неизвестный код пула — не
+    // ошибка (нода может быть запровижена раньше, чем зарегистрирована в
+    // инвентаре), просто нечего отмечать.
+    async recordPoolClientsSync(poolCode: string): Promise<boolean> {
+      const result = await prisma.serverPool.updateMany({
+        where: { code: poolCode },
+        data: { clientsSyncedAt: new Date() }
+      });
+
+      return result.count > 0;
     }
   };
 }

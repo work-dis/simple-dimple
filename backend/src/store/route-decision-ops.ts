@@ -27,16 +27,41 @@ import {
 } from "./ops-summary-shared.js";
 import type { DegradationWindow, InventoryEndpointRecord, RouteDecisionOpsEventRecord } from "./ops-summary-shared.js";
 
+// Порог протухания client-list синка. Крон на нодах ходит раз в 5 минут;
+// 30 минут = 6 подряд пропущенных прогонов — заведомо не разовый флап сети.
+export const clientSyncStaleThresholdMinutes = 30;
+
+export type PoolClientSyncRecord = {
+  code: string;
+  clientsSyncedAt: Date | null;
+};
+
 export function buildRouteDecisionOpsSummary(input: {
   routeEvents: RouteDecisionOpsEventRecord[];
   routeReprobeJobs: RouteReprobeJob[];
   endpointInventory?: InventoryEndpointRecord[];
+  poolClientSync?: PoolClientSyncRecord[];
   windowHours: number;
   recentLimit: number;
   summaryLimit: number;
   now?: Date;
 }): RouteDecisionOpsSummary {
   const now = input.now ?? new Date();
+  // Хартбит client-list синка: пул "протух", если активная нода не читала
+  // /api/admin/vless-clients?pool=<code> дольше порога (крон на нодах ходит
+  // раз в 5 минут — 30 минут это 6 подряд пропущенных прогонов, не флап).
+  // clientsSyncedAt === null означает "ни разу с момента ввода хартбита" и
+  // тоже считается протухшим — иначе сломанный с самого начала крон никогда
+  // не поднимет алерт.
+  const poolClientSyncRecords = input.poolClientSync ?? [];
+  const staleClientSyncPools = poolClientSyncRecords
+    .filter(
+      (pool) =>
+        pool.clientsSyncedAt === null ||
+        now.getTime() - pool.clientsSyncedAt.getTime() > clientSyncStaleThresholdMinutes * 60_000
+    )
+    .map((pool) => pool.code)
+    .sort();
   const feedbackEvents = input.routeEvents.filter(
     (event) =>
       event.eventType === "route_feedback" &&
@@ -600,7 +625,9 @@ export function buildRouteDecisionOpsSummary(input: {
     largestRegionalDomainSize: inventoryHealth.largestRegionalDomainSize,
     minimumRecommendedFailureDomains: inventoryHealth.minimumRecommendedFailureDomains,
     inventoryFailedDimensions: inventoryHealth.failedDimensions,
-    inventoryPolicyViolationMessage: inventoryHealth.policyViolationMessage
+    inventoryPolicyViolationMessage: inventoryHealth.policyViolationMessage,
+    staleClientSyncPools,
+    clientSyncThresholdMinutes: clientSyncStaleThresholdMinutes
   });
 
   const overallSeverity = computeOpsOverallSeverity(alerts);
@@ -727,6 +754,11 @@ export function buildRouteDecisionOpsSummary(input: {
         minimumRecommendedFailureDomains: inventoryHealth.minimumRecommendedFailureDomains,
         failedDimensions: inventoryHealth.failedDimensions,
         policyViolationMessage: inventoryHealth.policyViolationMessage
+      },
+      clientSync: {
+        trackedPools: poolClientSyncRecords.length,
+        stalePools: staleClientSyncPools,
+        thresholdMinutes: clientSyncStaleThresholdMinutes
       },
       retention: opsRetentionPolicy,
       history,

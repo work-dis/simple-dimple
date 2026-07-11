@@ -581,4 +581,61 @@ describe("buildRouteDecisionOpsSummary", () => {
       })
     );
   });
+
+  it("raises a critical alert when a pool's client-list sync heartbeat is stale or missing", () => {
+    const now = new Date("2026-07-11T12:00:00.000Z");
+    const summary = buildRouteDecisionOpsSummary({
+      windowHours: 6,
+      recentLimit: 12,
+      summaryLimit: 6,
+      now,
+      routeEvents: [],
+      routeReprobeJobs: [],
+      poolClientSync: [
+        // Живой: синкался 5 минут назад.
+        { code: "fr-test-1", clientsSyncedAt: new Date(now.getTime() - 5 * 60_000) },
+        // Протух: последний хартбит старше порога (30 минут).
+        { code: "de-test-1", clientsSyncedAt: new Date(now.getTime() - 45 * 60_000) },
+        // Ни разу не синкался — крон сломан с самого начала.
+        { code: "nl-test-1", clientsSyncedAt: null },
+      ],
+    });
+
+    expect(summary.operationalSummary.clientSync).toEqual({
+      trackedPools: 3,
+      stalePools: ["de-test-1", "nl-test-1"],
+      thresholdMinutes: 30,
+    });
+    expect(detectOpsAlertsFromSummary(summary)).toContainEqual(
+      expect.objectContaining({
+        id: "xray-client-sync-stale",
+        severity: "critical",
+      })
+    );
+  });
+
+  it("does not raise the client-sync alert when all pools sync within the threshold", () => {
+    const now = new Date("2026-07-11T12:00:00.000Z");
+    const summary = buildRouteDecisionOpsSummary({
+      windowHours: 6,
+      recentLimit: 12,
+      summaryLimit: 6,
+      now,
+      routeEvents: [],
+      routeReprobeJobs: [],
+      poolClientSync: [
+        { code: "fr-test-1", clientsSyncedAt: new Date(now.getTime() - 5 * 60_000) },
+        { code: "fr-contabo-1", clientsSyncedAt: new Date(now.getTime() - 29 * 60_000) },
+      ],
+    });
+
+    expect(summary.operationalSummary.clientSync).toEqual({
+      trackedPools: 2,
+      stalePools: [],
+      thresholdMinutes: 30,
+    });
+    expect(detectOpsAlertsFromSummary(summary).map((alert) => alert.id)).not.toContain(
+      "xray-client-sync-stale"
+    );
+  });
 });

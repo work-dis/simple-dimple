@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 import type { FastifyReply, FastifyRequest, RouteGenericInterface } from "fastify";
 import type { BackendRuntime } from "../runtime.js";
 import type { ResolveRoutesBody, TelemetryNetworkContext } from "../types.js";
@@ -60,6 +62,38 @@ export function requireAdminAuthSession(context: RequestAuthContext, reply: Pick
 
   reply.code(403);
   return false;
+}
+
+// Выделенный scoped-токен для deploy/xray/sync-clients.sh (крон на каждой
+// Xray-ноде). До него крон ходил с полной admin-сессией (x-auth-session-id),
+// что означало: (1) сессия истекает через authSessionTtlMs и крон молча
+// умирает через ~30 дней; (2) утечка значения из crontab давала весь admin
+// API, а не только read-only список клиентов. Токен статический (env
+// FLEET_SYNC_TOKEN), без срока жизни, и валиден ТОЛЬКО для эндпоинтов, где
+// его явно проверяют. Пустой/не заданный env полностью выключает этот путь.
+export function isValidFleetSyncToken(request: {
+  headers: Record<string, string | string[] | undefined>;
+}) {
+  const expected = process.env.FLEET_SYNC_TOKEN ?? "";
+  if (expected.length < 16) {
+    // Слишком короткий токен — считаем фичу выключенной, чтобы случайный
+    // "test"/"1" в env не превратился в реальный обход admin-аутентификации.
+    return false;
+  }
+
+  const rawHeader = request.headers["x-fleet-sync-token"];
+  const provided = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+  if (!provided) {
+    return false;
+  }
+
+  const expectedBuffer = Buffer.from(expected);
+  const providedBuffer = Buffer.from(provided);
+  if (expectedBuffer.length !== providedBuffer.length) {
+    return false;
+  }
+
+  return timingSafeEqual(expectedBuffer, providedBuffer);
 }
 
 // Оборачивает admin-only route-хендлер: резолвит auth-context, отсекает

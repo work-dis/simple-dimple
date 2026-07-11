@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { BackendRuntime } from "../runtime.js";
 import { registerAdminEndpointBodySchema } from "../schemas.js";
 import type { RegisterAdminEndpointBody, SetAdminEndpointActiveBody, UpdateUserAdminBody } from "../types.js";
-import { isStatusCodeError, replyWithStatusCodeError, withAdminAuth } from "./context.js";
+import { getRequestAuthContext, isStatusCodeError, isValidFleetSyncToken, replyWithStatusCodeError, requireAdminAuthSession, withAdminAuth } from "./context.js";
 
 export function registerAdminRoutes(app: FastifyInstance, runtime: BackendRuntime) {
   const store = runtime.store;
@@ -118,15 +118,33 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: BackendRuntim
 
   // Шаг 2 (PRIORITY_PLAN.md) — per-node client-list sync: источник правды для
   // deploy/xray/sync-clients.sh (не публичный — раскрывает все выданные
-  // vlessUuid, поэтому за тем же requireAdminAuthSession, что и остальной
-  // fleet-inventory).
-  app.get(
+  // vlessUuid). Два равноправных пути аутентификации:
+  //  - x-fleet-sync-token (env FLEET_SYNC_TOKEN) — то, чем ходит крон на
+  //    нодах: не истекает и не даёт доступа к остальному admin API;
+  //  - обычная admin-сессия — для ручной отладки из админки/curl.
+  // ?pool=<ServerPool.code> — хартбит: отмечаем, что эта нода живо синкается;
+  // на нём построен ops-алерт "клиенты не синкались дольше порога".
+  app.get<{ Querystring: { pool?: string } }>(
     "/api/admin/vless-clients",
-    withAdminAuth(runtime, async () => {
+    async (request, reply) => {
+      if (!isValidFleetSyncToken(request)) {
+        const context = await getRequestAuthContext(runtime, request);
+        if (!requireAdminAuthSession(context, reply)) {
+          return {
+            error: context.auth.isAuthenticated ? "Admin access required" : "Authentication required"
+          };
+        }
+      }
+
+      const poolCode = request.query.pool?.trim();
+      if (poolCode) {
+        await store.recordPoolClientsSync(poolCode);
+      }
+
       return {
         clients: await store.listVlessClients()
       };
-    })
+    }
   );
 
   app.post<{ Body: RegisterAdminEndpointBody }>(

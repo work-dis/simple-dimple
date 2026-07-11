@@ -20,10 +20,21 @@
 #
 # Запускать НА самой Xray-ноде (тот же хост, где provision-node.sh поднял
 # контейнер), по cron, например раз в 5 минут:
-#   */5 * * * * /opt/simple-dimple/deploy/xray/sync-clients.sh --pool fr-test-1 --api-base http://localhost:8080 --admin-session <id> >> /var/log/xray-sync-clients.log 2>&1
+#   */5 * * * * /opt/simple-dimple/deploy/xray/sync-clients.sh --pool fr-test-1 --api-base https://<control-plane> --sync-token <FLEET_SYNC_TOKEN> >> /var/log/xray-sync-clients.log 2>&1
 #
 # Использование:
-#   sync-clients.sh --pool <pool-code> --api-base <url> --admin-session <x-auth-session-id>
+#   sync-clients.sh --pool <pool-code> --api-base <url> --sync-token <FLEET_SYNC_TOKEN>
+#   sync-clients.sh --pool <pool-code> --api-base <url> --admin-session <x-auth-session-id>   # legacy
+#
+# --sync-token — выделенный статический токен (env FLEET_SYNC_TOKEN на
+# backend'е): не истекает и даёт доступ ТОЛЬКО к /api/admin/vless-clients,
+# в отличие от admin-сессии, которая истекает через ~30 дней (authSessionTtlMs)
+# и открывает весь admin API. --admin-session оставлен для ручной отладки.
+#
+# ?pool=<code> в запросе — хартбит: backend отмечает ServerPool.clientsSyncedAt,
+# и ops-алерт "xray-client-sync-stale" ловит молчаливую смерть этого крона
+# (реальный инцидент 2026-07-10: потерянный бит исполнения — 20+ часов тихих
+# Permission denied в кроне на обоих хостах).
 
 set -euo pipefail
 
@@ -37,19 +48,27 @@ require_cmd() {
 pool_code=""
 api_base=""
 admin_session=""
+sync_token=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --pool) pool_code="$2"; shift 2 ;;
     --api-base) api_base="$2"; shift 2 ;;
     --admin-session) admin_session="$2"; shift 2 ;;
+    --sync-token) sync_token="$2"; shift 2 ;;
     *) die "Unknown argument: $1" ;;
   esac
 done
 
 [[ -n "$pool_code" ]] || die "--pool is required"
 [[ -n "$api_base" ]] || die "--api-base is required"
-[[ -n "$admin_session" ]] || die "--admin-session is required"
+[[ -n "$sync_token" || -n "$admin_session" ]] || die "--sync-token (or legacy --admin-session) is required"
+
+if [[ -n "$sync_token" ]]; then
+  auth_header="x-fleet-sync-token: $sync_token"
+else
+  auth_header="x-auth-session-id: $admin_session"
+fi
 
 require_cmd curl
 require_cmd jq
@@ -61,7 +80,7 @@ container_name="simple-dimple-xray-${pool_code}"
 [[ -f "$config_path" ]] || die "$config_path not found — provision this node with provision-node.sh first"
 
 log "Fetching current vless client list from $api_base"
-clients_json="$(curl -sf -H "x-auth-session-id: $admin_session" "$api_base/api/admin/vless-clients")"
+clients_json="$(curl -sf -H "$auth_header" "$api_base/api/admin/vless-clients?pool=$pool_code")"
 new_clients="$(echo "$clients_json" | jq '[.clients[] | {id: .uuid, flow: .flow}]')"
 
 client_count="$(echo "$new_clients" | jq 'length')"

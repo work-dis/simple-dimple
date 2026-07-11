@@ -663,9 +663,19 @@ export type RouteDecisionOpsOperationalSummary = {
   activeAlertCount: number;
   alerts: RouteDecisionOpsAlert[];
   inventoryHealth: RouteDecisionOpsInventoryHealth;
+  clientSync: RouteDecisionOpsClientSyncHealth;
   retention: RouteDecisionOpsRetentionPolicy;
   history: RouteDecisionOpsHistoryWindow[];
   dailyHistory: RouteDecisionOpsDailyHistoryWindow[];
+};
+
+// Здоровье per-node client-list синка (deploy/xray/sync-clients.sh):
+// stalePools — коды активных пулов, чей хартбит (?pool= на
+// /api/admin/vless-clients) старше порога или отсутствует вовсе.
+export type RouteDecisionOpsClientSyncHealth = {
+  trackedPools: number;
+  stalePools: string[];
+  thresholdMinutes: number;
 };
 
 export type RouteDecisionQualityMetrics = {

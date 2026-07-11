@@ -166,9 +166,17 @@ export function createAdminStore(prisma: PrismaClient) {
           }
         }
       });
+      const poolClientSync = await prisma.serverPool.findMany({
+        where: { isActive: true },
+        select: {
+          code: true,
+          clientsSyncedAt: true
+        }
+      });
       return buildRouteDecisionOpsSummary({
         routeEvents,
         routeReprobeJobs,
+        poolClientSync,
         endpointInventory: endpointInventory.map((endpoint) => ({
           endpointId: endpoint.id,
           provider: endpoint.provider,

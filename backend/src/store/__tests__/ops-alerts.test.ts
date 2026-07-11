@@ -95,6 +95,11 @@ function createOpsSummary(overrides?: Partial<RouteDecisionOpsSummary>): RouteDe
         failedDimensions: [],
         policyViolationMessage: null
       },
+      clientSync: {
+        trackedPools: 0,
+        stalePools: [],
+        thresholdMinutes: 30
+      },
       retention: {
         probeReportsDays: 45,
         routeEventsDays: 45,
@@ -576,6 +581,11 @@ describe("createOpsAlertStore", () => {
               failedDimensions: [],
               policyViolationMessage: null
             },
+            clientSync: {
+              trackedPools: 0,
+              stalePools: [],
+              thresholdMinutes: 30
+            },
             retention: {
               probeReportsDays: 45,
               routeEventsDays: 45,
@@ -669,6 +679,11 @@ describe("createOpsAlertStore", () => {
               failedDimensions: ["active endpoints 2/3", "providers 2/3", "ASNs 2/3", "regions 2/3"],
               policyViolationMessage:
                 "Active inventory must keep at least 3 independent failure domains across provider/ASN/region; got active endpoints 2/3, providers 2/3, ASNs 2/3, regions 2/3."
+            },
+            clientSync: {
+              trackedPools: 0,
+              stalePools: [],
+              thresholdMinutes: 30
             },
             retention: {
               probeReportsDays: 45,

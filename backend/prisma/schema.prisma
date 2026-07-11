@@ -77,6 +77,12 @@ model ServerPool {
   region      String?
   priority    Int
   isActive    Boolean    @default(true)
+  // Хартбит per-node client-list синка: deploy/xray/sync-clients.sh на каждой
+  // ноде передаёт ?pool=<code> при чтении /api/admin/vless-clients, backend
+  // отмечает время. Ops-алерт "клиенты не синкались" строится на этом поле —
+  // молчаливое умирание крона (бит исполнения, истёкшая сессия) больше не
+  // остаётся незамеченным.
+  clientsSyncedAt DateTime?
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
   endpoints   Endpoint[]

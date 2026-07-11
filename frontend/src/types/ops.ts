@@ -212,9 +212,19 @@ export type RouteDecisionOpsOperationalSummary = {
   activeAlertCount: number;
   alerts: RouteDecisionOpsAlert[];
   inventoryHealth: RouteDecisionOpsInventoryHealth;
+  clientSync: RouteDecisionOpsClientSyncHealth;
   retention: RouteDecisionOpsRetentionPolicy;
   history: RouteDecisionOpsHistoryWindow[];
   dailyHistory: RouteDecisionOpsDailyHistoryWindow[];
+};
+
+// Зеркало backend/src/types.ts — здоровье per-node client-list синка
+// (deploy/xray/sync-clients.sh): stalePools — активные пулы, чей хартбит
+// старше порога или отсутствует.
+export type RouteDecisionOpsClientSyncHealth = {
+  trackedPools: number;
+  stalePools: string[];
+  thresholdMinutes: number;
 };
 
 export type RouteDecisionQualityMetrics = {
