@@ -69,8 +69,19 @@ class VpnTunnelPlugin : Plugin() {
     }
 
     // config shape is ConnectionConfigSummary from frontend/src/types — top-level
-    // uri/endpointId/protocol/security plus a nested `params` object with the
-    // actual VLESS+REALITY fields.
+    // uri/endpointId/protocol/security plus a nested `params` object whose shape
+    // depends on config.protocol (see buildVlessRealityConnectionConfig /
+    // buildTrojanConnectionConfig / buildShadowsocksConnectionConfig in
+    // backend/src/connection-config.ts — this is the client-side mirror of those
+    // three params shapes).
+    //
+    // НЕ ПРОВЕРЕНО НА УСТРОЙСТВЕ (написано в сессии без adb/эмулятора —
+    // см. обсуждение в DECISIONS.md, Decision 053/054): Trojan/Shadowsocks-2022
+    // ветки собраны по документированной xray-core outbound-схеме и по тем же
+    // pinned-cert/multi-user деталям, что уже live-verified на серверной
+    // стороне (Decision 053) — но сам outbound здесь никогда не поднимался на
+    // реальном телефоне. Нужно собрать это APK и проверить на устройстве
+    // перед тем, как полагаться на него как на единственный fallback-путь.
     private fun parseTunnelParams(call: PluginCall): TunnelParams? {
         val config = call.getObject("config")
         if (config == null) {
@@ -84,27 +95,71 @@ class VpnTunnelPlugin : Plugin() {
             return null
         }
 
-        val tunnelParams = TunnelParams(
-            uuid = params.optString("uuid", ""),
-            address = params.optString("address", ""),
-            port = params.optInt("port", 0),
-            flow = params.optString("flow", ""),
-            sni = params.optString("sni", ""),
-            fingerprint = params.optString("fingerprint", ""),
-            publicKey = params.optString("publicKey", ""),
-            shortId = params.optString("shortId", "")
-        )
-
-        if (tunnelParams.address.isEmpty() || tunnelParams.port == 0) {
+        val address = params.optString("address", "")
+        val port = params.optInt("port", 0)
+        if (address.isEmpty() || port == 0) {
             call.reject("config.params.address and config.params.port are required")
             return null
         }
-        if (tunnelParams.uuid.isEmpty() || tunnelParams.publicKey.isEmpty()) {
-            call.reject("config.params.uuid and config.params.publicKey are required")
-            return null
-        }
 
-        return tunnelParams
+        return when (val protocol = config.optString("protocol", "vless")) {
+            "vless" -> {
+                val uuid = params.optString("uuid", "")
+                val publicKey = params.optString("publicKey", "")
+                if (uuid.isEmpty() || publicKey.isEmpty()) {
+                    call.reject("config.params.uuid and config.params.publicKey are required")
+                    return null
+                }
+                TunnelParams.Vless(
+                    uuid = uuid,
+                    address = address,
+                    port = port,
+                    flow = params.optString("flow", ""),
+                    sni = params.optString("sni", ""),
+                    fingerprint = params.optString("fingerprint", ""),
+                    publicKey = publicKey,
+                    shortId = params.optString("shortId", "")
+                )
+            }
+            "trojan" -> {
+                val password = params.optString("password", "")
+                if (password.isEmpty()) {
+                    call.reject("config.params.password is required")
+                    return null
+                }
+                TunnelParams.Trojan(
+                    password = password,
+                    address = address,
+                    port = port,
+                    sni = params.optString("sni", ""),
+                    fingerprint = params.optString("fingerprint", ""),
+                    alpn = params.optString("alpn", "h2,http/1.1"),
+                    // optString returns "" (not null) for a JSON null value, so an
+                    // absent/null certSha256 (real-CA node, no pinning) collapses to
+                    // empty-means-null here rather than the literal string "null".
+                    certSha256 = params.optString("certSha256", "").ifEmpty { null }
+                )
+            }
+            "shadowsocks-2022" -> {
+                val serverKey = params.optString("serverKey", "")
+                val userKey = params.optString("userKey", "")
+                if (serverKey.isEmpty() || userKey.isEmpty()) {
+                    call.reject("config.params.serverKey and config.params.userKey are required")
+                    return null
+                }
+                TunnelParams.Shadowsocks(
+                    method = params.optString("method", "2022-blake3-aes-256-gcm"),
+                    serverKey = serverKey,
+                    userKey = userKey,
+                    address = address,
+                    port = port
+                )
+            }
+            else -> {
+                call.reject("unsupported protocol: $protocol")
+                null
+            }
+        }
     }
 
     private fun startTunnel(call: PluginCall, tunnelParams: TunnelParams) {
@@ -177,24 +232,76 @@ class VpnTunnelPlugin : Plugin() {
     }
 }
 
-internal data class TunnelParams(
-    val uuid: String,
-    val address: String,
-    val port: Int,
-    val flow: String,
-    val sni: String,
-    val fingerprint: String,
-    val publicKey: String,
-    val shortId: String
-)
+// One variant per protocol connection-config.ts can issue. address/port are
+// common to all three so buildXrayConfig's shared "tun" inbound wiring can
+// stay outside the `when`.
+internal sealed class TunnelParams {
+    abstract val address: String
+    abstract val port: Int
+
+    data class Vless(
+        val uuid: String,
+        override val address: String,
+        override val port: Int,
+        val flow: String,
+        val sni: String,
+        val fingerprint: String,
+        val publicKey: String,
+        val shortId: String
+    ) : TunnelParams()
+
+    data class Trojan(
+        val password: String,
+        override val address: String,
+        override val port: Int,
+        val sni: String,
+        val fingerprint: String,
+        val alpn: String,
+        val certSha256: String?
+    ) : TunnelParams()
+
+    data class Shadowsocks(
+        val method: String,
+        val serverKey: String,
+        val userKey: String,
+        override val address: String,
+        override val port: Int
+    ) : TunnelParams()
+}
 
 // Builds an Xray-core JSON config: a single "tun" inbound (reads/writes the
 // fd handed out by VpnService.Builder.establish(), see
 // https://github.com/XTLS/Xray-core/blob/main/proxy/tun/README.md) and a
-// single VLESS+REALITY outbound built from the connection config the backend
-// issued. No routing rules needed — with exactly one outbound, Xray-core
-// sends everything there by default.
+// single outbound — protocol-specific settings/streamSettings built from the
+// connection config the backend issued. No routing rules needed — with
+// exactly one outbound, Xray-core sends everything there by default.
 internal fun buildXrayConfig(params: TunnelParams): String {
+    val outbound = when (params) {
+        is TunnelParams.Vless -> buildVlessOutbound(params)
+        is TunnelParams.Trojan -> buildTrojanOutbound(params)
+        is TunnelParams.Shadowsocks -> buildShadowsocksOutbound(params)
+    }
+    val inboundSettings = org.json.JSONObject().apply {
+        put("name", "xraytun0")
+        put("mtu", 1500)
+    }
+    val inbound = org.json.JSONObject().apply {
+        put("protocol", "tun")
+        put("settings", inboundSettings)
+    }
+    val root = org.json.JSONObject().apply {
+        // "debug" (not "warning") so a real-device retest of the still-open
+        // "no traffic reaches the server" question (see docs/DECISIONS.md,
+        // Decision 032) actually shows where the outbound dial/handshake
+        // stalls, instead of only "started"/"stopped" lines.
+        put("log", org.json.JSONObject().put("loglevel", "debug"))
+        put("inbounds", org.json.JSONArray().put(inbound))
+        put("outbounds", org.json.JSONArray().put(outbound))
+    }
+    return root.toString()
+}
+
+private fun buildVlessOutbound(params: TunnelParams.Vless): org.json.JSONObject {
     val user = org.json.JSONObject().apply {
         put("id", params.uuid)
         put("encryption", "none")
@@ -220,27 +327,62 @@ internal fun buildXrayConfig(params: TunnelParams): String {
         put("security", "reality")
         put("realitySettings", realitySettings)
     }
-    val outbound = org.json.JSONObject().apply {
+    return org.json.JSONObject().apply {
         put("protocol", "vless")
         put("settings", outboundSettings)
         put("streamSettings", streamSettings)
     }
-    val inboundSettings = org.json.JSONObject().apply {
-        put("name", "xraytun0")
-        put("mtu", 1500)
+}
+
+private fun buildTrojanOutbound(params: TunnelParams.Trojan): org.json.JSONObject {
+    val server = org.json.JSONObject().apply {
+        put("address", params.address)
+        put("port", params.port)
+        put("password", params.password)
     }
-    val inbound = org.json.JSONObject().apply {
-        put("protocol", "tun")
-        put("settings", inboundSettings)
+    val outboundSettings = org.json.JSONObject().apply {
+        put("servers", org.json.JSONArray().put(server))
     }
-    val root = org.json.JSONObject().apply {
-        // "debug" (not "warning") so a real-device retest of the still-open
-        // "no traffic reaches the server" question (see docs/DECISIONS.md,
-        // Decision 032) actually shows where the REALITY dial/handshake
-        // stalls, instead of only "started"/"stopped" lines.
-        put("log", org.json.JSONObject().put("loglevel", "debug"))
-        put("inbounds", org.json.JSONArray().put(inbound))
-        put("outbounds", org.json.JSONArray().put(outbound))
+    val tlsSettings = org.json.JSONObject().apply {
+        put("serverName", params.sni)
+        put("fingerprint", params.fingerprint)
+        put("alpn", org.json.JSONArray(params.alpn.split(",").map { it.trim() }))
+        // Self-signed nodes without a real domain (Decision 053, DECISIONS.md):
+        // this xray-core build (26.3.27) dropped `allowInsecure` in favor of
+        // `pinnedPeerCertSha256` — singular, hex (not base64), confirmed by a
+        // live handshake test against 57.128.220.83. certSha256 is null only
+        // for a hypothetical node with a real CA cert, where pinning is unneeded.
+        if (params.certSha256 != null) {
+            put("pinnedPeerCertSha256", params.certSha256)
+        }
     }
-    return root.toString()
+    val streamSettings = org.json.JSONObject().apply {
+        put("network", "tcp")
+        put("security", "tls")
+        put("tlsSettings", tlsSettings)
+    }
+    return org.json.JSONObject().apply {
+        put("protocol", "trojan")
+        put("settings", outboundSettings)
+        put("streamSettings", streamSettings)
+    }
+}
+
+private fun buildShadowsocksOutbound(params: TunnelParams.Shadowsocks): org.json.JSONObject {
+    // Multi-user 2022 scheme: client key is "serverKey:userKey", same
+    // combination connection-config.ts uses to build the ss:// URI
+    // (buildShadowsocksConnectionUri, backend/src/connection-config.ts).
+    val server = org.json.JSONObject().apply {
+        put("address", params.address)
+        put("port", params.port)
+        put("method", params.method)
+        put("password", "${params.serverKey}:${params.userKey}")
+    }
+    val outboundSettings = org.json.JSONObject().apply {
+        put("servers", org.json.JSONArray().put(server))
+    }
+    return org.json.JSONObject().apply {
+        put("protocol", "shadowsocks")
+        put("settings", outboundSettings)
+    }
 }

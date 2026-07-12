@@ -147,6 +147,56 @@ export function registerAdminRoutes(app: FastifyInstance, runtime: BackendRuntim
     }
   );
 
+  // Протокольная diversity (Decision 052) — тот же паттерн, что
+  // /api/admin/vless-clients выше (fleet-sync-token ИЛИ admin-сессия,
+  // ?pool= heartbeat), но для двух новых протоколов. Источник правды для
+  // deploy/xray/sync-clients.sh.
+  app.get<{ Querystring: { pool?: string } }>(
+    "/api/admin/trojan-clients",
+    async (request, reply) => {
+      if (!isValidFleetSyncToken(request)) {
+        const context = await getRequestAuthContext(runtime, request);
+        if (!requireAdminAuthSession(context, reply)) {
+          return {
+            error: context.auth.isAuthenticated ? "Admin access required" : "Authentication required"
+          };
+        }
+      }
+
+      const poolCode = request.query.pool?.trim();
+      if (poolCode) {
+        await store.recordPoolClientsSync(poolCode);
+      }
+
+      return {
+        clients: await store.listTrojanClients()
+      };
+    }
+  );
+
+  app.get<{ Querystring: { pool?: string } }>(
+    "/api/admin/shadowsocks-clients",
+    async (request, reply) => {
+      if (!isValidFleetSyncToken(request)) {
+        const context = await getRequestAuthContext(runtime, request);
+        if (!requireAdminAuthSession(context, reply)) {
+          return {
+            error: context.auth.isAuthenticated ? "Admin access required" : "Authentication required"
+          };
+        }
+      }
+
+      const poolCode = request.query.pool?.trim();
+      if (poolCode) {
+        await store.recordPoolClientsSync(poolCode);
+      }
+
+      return {
+        clients: await store.listShadowsocksClients()
+      };
+    }
+  );
+
   app.post<{ Body: RegisterAdminEndpointBody }>(
     "/api/admin/endpoints",
     { schema: { body: registerAdminEndpointBodySchema } },

@@ -696,8 +696,31 @@ inventory разом.
    пользователя не весь inventory, а подмножество. — сделано, см.
    [DECISIONS.md, Decision 024](DECISIONS.md).
 4. Протокольная diversity (Trojan/Shadowsocks-2022 fallback,
-   [ROADMAP.md, Этап 6](ROADMAP.md)) — тоже часть этой защиты, но уже в
-   отдельной очереди. — не сделано, вне скоупа этого шага.
+   [ROADMAP.md, Этап 6](ROADMAP.md)) — тоже часть этой защиты, но была в
+   отдельной очереди. **Обновление (2026-07-12): сделано, включая живой
+   прогон**, см. [Decision 052](DECISIONS.md)/[Decision 053](DECISIONS.md) —
+   `connectionConfig` реально выдаётся для `trojan`/`shadowsocks-2022`
+   endpoint'ов (не только `vless`), `route-policy.ts` сначала предлагает
+   другой сервер с тем же протоколом (`same_protocol_fallback`), и лишь потом
+   меняет протокол (`transport_diagnostic_fallback`); реальный
+   Trojan+Shadowsocks-2022 inbound поднят на `57.128.220.83` рядом с рабочим
+   VLESS, живая проверка через reference-клиент пройдена для обоих.
+   **Обновление (2026-07-12, [Decision 054](DECISIONS.md)): UI-часть тоже
+   сделана** — экран "Конфигурации серверов" в Account (просмотр `uri` +
+   copy для любого сервера/протокола, лениво через уже существующий
+   `POST /api/routes/resolve`) и под-экран "Дополнительные настройки" за
+   Server (реальный `RouteHealthSnapshot` на пользователя, не только Ops).
+   **Обновление (2026-07-12, [Decision 055](DECISIONS.md)): два живых бага
+   в native auto-fallback найдены и исправлены** — client-side executor
+   резал shortlist на 4 кандидата вместо реального `shortlist.length`
+   (пятый, обычно `emergency_fallback`, никогда не пробовался), и
+   `VpnTunnelPlugin.kt` теперь ветвится по `config.protocol` (Trojan/
+   Shadowsocks-2022 outbound добавлены, собрано `./gradlew
+   compileDebugKotlin`, но **не проверено на реальном устройстве** — нет
+   `adb`/эмулятора в этой сессии). До живой device-проверки native
+   auto-fallback пользователя фильтруется до `protocol === "vless"` как
+   страховка.
+   Оба — за пределами Home, минимализм главного экрана не нарушен.
 
 ## Шаг 7 — Только теперь возвращаемся к alerting-слою
 

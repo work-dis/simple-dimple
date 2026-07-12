@@ -113,21 +113,17 @@ export const routeReprobeJobBodySchema: FastifySchema["body"] = {
   }
 };
 
+// Протокольная diversity (Decision 052): раньше здесь были жёстко required
+// REALITY-поля (publicKey/shortId/sni), что делало регистрацию
+// trojan/shadowsocks-2022 endpoint'а невозможной через это же тело запроса.
+// Теперь required — только общие для всех протоколов поля; protocol-specific
+// обязательность (publicKey/shortId/sni для vless, trojanSni для trojan,
+// ssServerKey для shadowsocks-2022) проверяется в
+// store/endpoints.ts::registerEndpoint() по значению protocol, тем же
+// паттерном, что уже был для остальных ручных проверок в этой функции.
 export const registerAdminEndpointBodySchema: FastifySchema["body"] = {
   type: "object",
-  required: [
-    "label",
-    "ipAddress",
-    "provider",
-    "countryCode",
-    "poolCode",
-    "protocol",
-    "transportProfile",
-    "port",
-    "publicKey",
-    "shortId",
-    "sni"
-  ],
+  required: ["label", "ipAddress", "provider", "countryCode", "poolCode", "protocol", "transportProfile", "port"],
   properties: {
     label: { type: "string", minLength: 1 },
     ipAddress: { type: "string", minLength: 1 },
@@ -147,6 +143,12 @@ export const registerAdminEndpointBodySchema: FastifySchema["body"] = {
     shortId: { type: "string", minLength: 1 },
     sni: { type: "string", minLength: 1 },
     fingerprint: { type: "string" },
-    flow: { type: "string" }
+    flow: { type: "string" },
+    trojanSni: { type: "string", minLength: 1 },
+    trojanFingerprint: { type: "string" },
+    trojanAlpn: { type: "string" },
+    trojanCertSha256: { type: "string" },
+    ssMethod: { type: "string" },
+    ssServerKey: { type: "string", minLength: 1 }
   }
 };

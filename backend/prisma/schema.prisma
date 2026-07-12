@@ -118,6 +118,13 @@ model Endpoint {
   updatedAt        DateTime   @updatedAt
   serverPool       ServerPool @relation(fields: [serverPoolId], references: [id], onDelete: Cascade)
   transportConfig  EndpointTransportConfig?
+  // Протокольная diversity (ROADMAP.md, Этап 6 / DECISIONS.md Decision 052):
+  // endpoint может нести транспорт-конфиг любого из трёх протоколов —
+  // vless/trojan/shadowsocks-2022 остаются отдельными nullable-таблицами
+  // (как и EndpointTransportConfig для REALITY), а не общими полями на
+  // Endpoint, потому что набор параметров у каждого протокола свой.
+  trojanTransportConfig      TrojanTransportConfig?
+  shadowsocksTransportConfig ShadowsocksTransportConfig?
   probeReports     ProbeReport[]
   routeSuccessRollups RouteSuccessRollup[]
   routeRankings    RouteRanking[]
@@ -147,6 +154,53 @@ model EndpointTransportConfig {
   endpoint    Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
 }
 
+// Trojan+TLS transport-параметры (ROADMAP.md, Этап 6 fallback-протокол).
+// Пароль — per-user (User.trojanPassword), здесь только то, что общее для
+// ноды: порт, SNI/fingerprint для uTLS handshake, ALPN.
+model TrojanTransportConfig {
+  id          String   @id
+  endpointId  String   @unique
+  port        Int
+  sni         String
+  fingerprint String   @default("chrome")
+  alpn        String   @default("h2,http/1.1")
+  // hex(SHA-256(DER-сертификат)) — тот же формат, что выводит
+  // `xray tls hash --cert <pem>` (совпадает и с `openssl x509 -fingerprint
+  // -sha256`, без двоеточий, lowercase) — для self-signed нод без своего
+  // домена. Найдено живой проверкой на 57.128.220.83 (Decision 053,
+  // DECISIONS.md): современный xray-core убрал `allowInsecure` в пользу
+  // `pinnedPeerCertSha256` (не `pinnedPeerCertificateChainSha256` —
+  // похожее, но несуществующее имя поля молча игнорируется, из-за чего
+  // первая живая попытка тоже провалилась), значение — hex, а не base64.
+  // Null — для гипотетической ноды с настоящим CA-сертификатом (домен +
+  // Let's Encrypt), где pinning не нужен.
+  certSha256  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  endpoint    Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+}
+
+// Shadowsocks-2022 transport-параметры (ROADMAP.md, Этап 6, emergency
+// fallback-протокол). `serverKey` — серверный PSK (общий для ноды);
+// per-user PSK — User.shadowsocksUserKey. Итоговый ключ клиента для
+// multi-user 2022-режима — "serverKey:userKey" (см. connection-config.ts).
+model ShadowsocksTransportConfig {
+  id        String   @id
+  endpointId String  @unique
+  port      Int
+  // 256-bit cipher по умолчанию (не 128-bit): shadowsocks-2022 требует, чтобы
+  // серверный и все клиентские PSK совпадали по размеру с ключом шифра —
+  // 32 байта для aes-256-gcm/chacha20-poly1305 против 16 для aes-128-gcm.
+  // connection-config.ts генерирует и serverKey, и userKey одинаково как
+  // 32 случайных байта — 256-bit cipher избавляет от отдельной ветки
+  // "подобрать размер ключа под метод".
+  method    String   @default("2022-blake3-aes-256-gcm")
+  serverKey String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  endpoint  Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+}
+
 model User {
   id            String         @id
   displayName   String
@@ -154,6 +208,11 @@ model User {
   contactType   ContactType
   isAdmin       Boolean        @default(false)
   vlessUuid     String?        @unique
+  // Per-user секреты для остальных двух протоколов (ROADMAP.md, Этап 6) —
+  // тот же паттерн, что vlessUuid: генерируются лениво при первой выдаче
+  // connection-config (store/connection-config.ts), а не заранее.
+  trojanPassword     String?   @unique
+  shadowsocksUserKey String?   @unique
   opsAlertImmediateEnabled Boolean @default(true)
   opsAlertDigestEnabled    Boolean @default(true)
   opsAlertEscalationTier   String  @default("primary")

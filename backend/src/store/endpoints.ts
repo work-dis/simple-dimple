@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto";
 import type { PrismaClient } from "../generated/prisma/client.js";
 import { getInventoryPolicyViolation, summarizeInventoryHealth } from "../inventory-policy.js";
 import type { InventoryPolicyRecord } from "../inventory-policy.js";
-import type { AdminEndpointSummary, RegisterAdminEndpointBody, VlessClientSummary } from "../types.js";
+import type {
+  AdminEndpointSummary,
+  RegisterAdminEndpointBody,
+  ShadowsocksClientSummary,
+  TrojanClientSummary,
+  VlessClientSummary
+} from "../types.js";
 import { StoreError } from "./utils.js";
 
 // Шаг 5 (PRIORITY_PLAN.md) — fleet provisioning для Xray-нод: регистрация
@@ -122,6 +128,11 @@ export function createEndpointsStore(prisma: PrismaClient) {
       return rows.map(mapEndpointRowToAdminSummary);
     },
 
+    // Протокольная diversity (Decision 052): раньше эта функция умела
+    // регистрировать только vless+REALITY endpoint'ы (жёсткая проверка
+    // publicKey/shortId/sni). Теперь диспатчит по input.protocol и создаёт
+    // соответствующий *TransportConfig — тем же паттерном одной Prisma
+    // create-транзакции с nested create, что и раньше.
     async registerEndpoint(input: RegisterAdminEndpointBody): Promise<AdminEndpointSummary> {
       if (
         !input.label ||
@@ -131,15 +142,25 @@ export function createEndpointsStore(prisma: PrismaClient) {
         !input.poolCode ||
         !input.protocol ||
         !input.transportProfile ||
-        !input.port ||
-        !input.publicKey ||
-        !input.shortId ||
-        !input.sni
+        !input.port
       ) {
         throw new StoreError(
-          "label, ipAddress, provider, countryCode, poolCode, protocol, transportProfile, port, publicKey, shortId and sni are required",
+          "label, ipAddress, provider, countryCode, poolCode, protocol, transportProfile and port are required",
           400
         );
+      }
+
+      if (input.protocol === "vless" && (!input.publicKey || !input.shortId || !input.sni)) {
+        throw new StoreError("publicKey, shortId and sni are required for protocol=vless", 400);
+      }
+      if (input.protocol === "trojan" && !input.trojanSni) {
+        throw new StoreError("trojanSni is required for protocol=trojan", 400);
+      }
+      if (input.protocol === "shadowsocks-2022" && !input.ssServerKey) {
+        throw new StoreError("ssServerKey is required for protocol=shadowsocks-2022", 400);
+      }
+      if (input.protocol !== "vless" && input.protocol !== "trojan" && input.protocol !== "shadowsocks-2022") {
+        throw new StoreError("protocol must be one of vless, trojan, shadowsocks-2022", 400);
       }
 
       const pool = await prisma.serverPool.upsert({
@@ -171,17 +192,44 @@ export function createEndpointsStore(prisma: PrismaClient) {
           latencyMs: input.latencyMs ?? 50,
           loadPercent: input.loadPercent ?? 0,
           isActive: true,
-          transportConfig: {
-            create: {
-              id: randomUUID(),
-              port: input.port,
-              publicKey: input.publicKey,
-              shortId: input.shortId,
-              sni: input.sni,
-              fingerprint: input.fingerprint ?? "chrome",
-              flow: input.flow ?? "xtls-rprx-vision"
-            }
-          }
+          transportConfig:
+            input.protocol === "vless"
+              ? {
+                  create: {
+                    id: randomUUID(),
+                    port: input.port,
+                    publicKey: input.publicKey!,
+                    shortId: input.shortId!,
+                    sni: input.sni!,
+                    fingerprint: input.fingerprint ?? "chrome",
+                    flow: input.flow ?? "xtls-rprx-vision"
+                  }
+                }
+              : undefined,
+          trojanTransportConfig:
+            input.protocol === "trojan"
+              ? {
+                  create: {
+                    id: randomUUID(),
+                    port: input.port,
+                    sni: input.trojanSni!,
+                    fingerprint: input.trojanFingerprint ?? "chrome",
+                    alpn: input.trojanAlpn ?? "h2,http/1.1",
+                    certSha256: input.trojanCertSha256 ?? null
+                  }
+                }
+              : undefined,
+          shadowsocksTransportConfig:
+            input.protocol === "shadowsocks-2022"
+              ? {
+                  create: {
+                    id: randomUUID(),
+                    port: input.port,
+                    method: input.ssMethod ?? "2022-blake3-aes-256-gcm",
+                    serverKey: input.ssServerKey!
+                  }
+                }
+              : undefined
         },
         include: includeForSummary
       });
@@ -266,6 +314,30 @@ export function createEndpointsStore(prisma: PrismaClient) {
         uuid: user.vlessUuid!,
         flow: "xtls-rprx-vision"
       }));
+    },
+
+    // Протокольная diversity (Decision 052) — тот же паттерн, что
+    // listVlessClients выше, для User.trojanPassword.
+    async listTrojanClients(): Promise<TrojanClientSummary[]> {
+      const users = await prisma.user.findMany({
+        where: { trojanPassword: { not: null } },
+        select: { trojanPassword: true }
+      });
+
+      return users.map((user) => ({ password: user.trojanPassword! }));
+    },
+
+    // Per-user PSK (User.shadowsocksUserKey). Итоговый ключ клиента —
+    // "serverKey:userKey" (см. connection-config.ts) — server-side xray
+    // combines the shared serverKey (inbound settings.password) with each
+    // client's individual password, поэтому здесь передаём только userKey.
+    async listShadowsocksClients(): Promise<ShadowsocksClientSummary[]> {
+      const users = await prisma.user.findMany({
+        where: { shadowsocksUserKey: { not: null } },
+        select: { shadowsocksUserKey: true }
+      });
+
+      return users.map((user) => ({ password: user.shadowsocksUserKey! }));
     },
 
     // Хартбит client-list синка: sync-clients.sh передаёт ?pool=<code> при

@@ -1,3 +1,4 @@
+import { formatProtocolLabel } from "../lib/formatters";
 import type { Session, ServerOption, RoutePolicy } from "../types";
 
 interface Props {
@@ -6,6 +7,7 @@ interface Props {
   routePolicy: RoutePolicy | null;
   isSubmitting: boolean;
   onChangeServer: (serverId: string) => void;
+  onOpenAdvanced: () => void;
 }
 
 export function ServerScreen({
@@ -14,6 +16,7 @@ export function ServerScreen({
   routePolicy,
   isSubmitting,
   onChangeServer,
+  onOpenAdvanced,
 }: Props) {
   // Быстрее всего — это то, что реально подставится при авто-подключении
   // (routePolicy), а не просто минимальный latencyMs "по бумаге".
@@ -62,11 +65,19 @@ export function ServerScreen({
               ) : null}
             </span>
             <small>
-              {server.region} · {server.latencyMeasuredAt ? `${server.latencyMs} мс` : "нет данных о пинге"}
+              {server.region} · {formatProtocolLabel(server.protocol)} ·{" "}
+              {server.latencyMeasuredAt ? `${server.latencyMs} мс` : "нет данных о пинге"}
             </small>
           </button>
         ))}
       </div>
+
+      {/* Задача #15 (PRIORITY_PLAN.md) — реальная connectivity-инфа живёт
+          отдельным под-экраном, а не на этом списке серверов, чтобы не
+          превращать выбор сервера в дашборд (ROADMAP.md — минимализм UI). */}
+      <button className="ghostButton fullWidth" onClick={onOpenAdvanced}>
+        Дополнительные настройки
+      </button>
     </>
   );
 }

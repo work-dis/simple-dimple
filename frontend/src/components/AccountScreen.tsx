@@ -38,6 +38,7 @@ interface Props {
   onRegisterWithPassword: () => void;
   onRequestVerificationCode: () => void;
   onVerifyCodeAuth: () => void;
+  onOpenServersConfig: () => void;
 }
 
 export function AccountScreen({
@@ -72,6 +73,7 @@ export function AccountScreen({
   onRegisterWithPassword,
   onRequestVerificationCode,
   onVerifyCodeAuth,
+  onOpenServersConfig,
 }: Props) {
   const isAuthenticated = auth?.isAuthenticated ?? false;
   const accountStatusLabel =
@@ -173,6 +175,15 @@ export function AccountScreen({
           </div>
 
           <div className="accountActions">
+            {/* Задача #14 (PRIORITY_PLAN.md) — конфиги/сертификаты по каждому
+                серверу живут отдельным экраном, а не среди полей аккаунта. */}
+            <button
+              className="secondaryButton fullWidth"
+              onClick={onOpenServersConfig}
+              disabled={isLoading || isSubmitting}
+            >
+              Конфигурации серверов
+            </button>
             {/* Read-only статус — нет backend-эндпоинта для переключения autoRenew, поэтому не <button> */}
             <span className="secondaryButton statusBadge">
               {account?.subscription.autoRenew

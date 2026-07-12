@@ -2608,6 +2608,355 @@ control-plane-хост `57.128.220.83`, а не отдельный сервер.
   только `defaults.ts`, который для этой ноды не используется —
   отдельные dev-vitrine данные).
 
+## Decision 052: сервера становятся многопротокольными — Trojan/Shadowsocks-2022 реально выдаются, fallback сначала пробует тот же протокол на другом сервере
+
+Дата: `2026-07-12`
+
+Тема: пользователь запросил протокольную diversity (ROADMAP.md, Этап 6:
+Trojan+TLS fallback, Shadowsocks-2022 emergency fallback) и явно описал
+желаемый порядок клиентского fallback: при отчёте о неудачном подключении
+backend сначала должен предлагать другой сервер с тем же протоколом, и
+только если такого нет — сервер с другим протоколом; кросс-пользовательская
+проверка "работает ли эта конфигурация у других" уже покрыта существующим
+ranking-слоем (`RouteSuccessRollup`/`RouteRanking`, агрегированы по
+`networkFingerprintId`, а не по конкретному пользователю).
+
+Что было не так:
+
+- `defaults.ts` уже показывал trojan/shadowsocks-2022 endpoint'ы как
+  vitrine-данные, но `store/connection-config.ts::issueConnectionConfig()`
+  жёстко отклонял любой `endpoint.protocol !== "vless"` —
+  `POST /api/connect`/`/api/server` для таких endpoint'ов всегда возвращали
+  `connectionConfig: null`, то есть "fallback на другой протокол" в
+  `route-policy.ts` уже существовал как метаданные в shortlist, но был
+  фактически нерабочим: клиент получал recommendedEndpointId на trojan-ноду,
+  но не мог получить для неё реальный конфиг;
+- `route-policy.ts` не различал "тот же протокол" от "другой домен" как
+  отдельную стадию — secondChoice-стадия (`transport_diagnostic_fallback`)
+  предпочитала любой другой failure domain, даже если это означало смену
+  протокола, хотя более дешёвая диагностика — сначала проверить, не в
+  конкретном ли IP/ноде дело, оставаясь на том же протоколе.
+
+Решение:
+
+- Prisma-схема: `TrojanTransportConfig`/`ShadowsocksTransportConfig` —
+  отдельные nullable 1:1-таблицы на `Endpoint`, тот же паттерн, что
+  `EndpointTransportConfig` для REALITY (не все endpoint'ы несут все три
+  транспорта). `User.trojanPassword`/`User.shadowsocksUserKey` — per-user
+  секреты, генерируются лениво при первой выдаче конфига, тот же паттерн,
+  что `User.vlessUuid`;
+- `connection-config.ts`: `buildTrojanConnectionConfig`/
+  `buildShadowsocksConnectionConfig` (+ URI-билдеры) рядом с существующим
+  `buildVlessRealityConnectionConfig`; `ConnectionConfigSummary` стал
+  discriminated union по `protocol` (backend `types.ts`, зеркально во
+  frontend `types/session.ts`);
+- `store/connection-config.ts::issueConnectionConfig()` теперь диспатчит по
+  `endpoint.protocol` вместо жёсткого отказа для non-vless;
+- `route-policy.ts`: новая стадия shortlist `same_protocol_fallback`,
+  вставлена строго перед существующей `transport_diagnostic_fallback` —
+  сначала другой сервер с тем же протоколом (при условии независимого
+  failure domain от primary, иначе просто любой другой IP на этом же
+  протоколе), и только когда такого нет — смена протокола. Кап
+  emergency-стадии поднят с `4` до `5`, чтобы новая стадия не вытесняла
+  существующие provider/ASN diversity-кандидаты;
+- `routes/connection.ts`: `same_protocol_fallback` добавлен в
+  `autoFallbackAssignmentReasons` — иначе client-side executor
+  (`connectFallback.ts`, Шаг 3 PRIORITY_PLAN.md) получал бы `400` при
+  попытке записать этот reason через `POST /api/server`.
+
+Сознательно не сделано в этом проходе:
+
+- `mobile/android-skeleton/VpnTunnelPlugin.kt` (`buildXrayConfig()`)
+  по-прежнему жёстко строит только VLESS+REALITY outbound — ветвление по
+  `config.protocol` для trojan/shadowsocks-2022 не добавлено, потому что в
+  этой сессии нет Android/Gradle-тулинга, чтобы собрать и вживую проверить
+  APK (тот же принцип, что и весь остальной проект: код без сборки/живой
+  проверки не считается готовым). До этого фикса протокольный fallback
+  реально работает в browser-only PWA и через reference-клиенты
+  (`xray-core` CLI и т.п.), но не через нативную Android-кнопку
+  "Подключить" — родное приложение получит trojan/shadowsocks-2022 конфиг
+  от backend, но native-плагин его не соберёт правильно;
+- ✅ (закрыто 2026-07-12, [Decision 053](DECISIONS.md)) реальный
+  Trojan/Shadowsocks-2022 inbound поднят на `57.128.220.83` рядом с рабочим
+  VLESS, живая проверка через reference-клиент пройдена для обоих новых
+  протоколов;
+- кросс-пользовательская проверка "работает ли конфигурация у других" не
+  тронута — она уже была реализована через `RouteSuccessRollup`/
+  `RouteRanking` (агрегация по `networkFingerprintId`, Этап 9 ROADMAP.md) и
+  подмешивается в shortlist через `routeHealthMap`; отдельного изменения
+  не потребовалось.
+
+Тесты: `buildTrojanConnectionConfig`/`buildShadowsocksConnectionConfig` и их
+URI-билдеры (`backend/src/__tests__/connection-config.test.ts`), dispatch по
+протоколу и генерация/переиспользование per-user секретов
+(`backend/src/store/__tests__/connection-config.test.ts`), две новые сцены
+в `backend/src/__tests__/route-policy.test.ts` (same-protocol fallback
+находится, когда есть кандидат; корректный provider/тест на смену
+протокола, когда такого кандидата нет) — обе существующие сцены в том же
+файле остались зелёными без изменений. `npm run typecheck`/`test` backend
+(287/287) и frontend (11/11), `npm run lint` (весь репозиторий) — зелёные.
+
+## Decision 053: Trojan+Shadowsocks-2022 реально подняты на 57.128.220.83 рядом с рабочим VLESS — два живых бага найдены и исправлены через живую проверку
+
+Дата: `2026-07-12`
+
+Тема: пользователь явно указал не бояться прод-хоста ("это мы всё только
+разрабатываем и допиливаем") и потребовал, чтобы все три протокола
+собирались на каждом сервере одной командой. Реализовано: `provision-node.sh
+register` теперь всегда поднимает VLESS+REALITY, Trojan+TLS и
+Shadowsocks-2022 как три inbound'а одного xray-core процесса на разных
+портах и регистрирует три `Endpoint`-записи за один запуск (флаги
+`--skip-trojan`/`--skip-shadowsocks` — если конкретный протокол не нужен).
+`deploy/xray/sync-clients.sh` синкает client-list каждого присутствующего в
+конфиге inbound'а отдельно (пропускает протокол, если его нет на ноде).
+
+Схема: `TrojanTransportConfig`/`ShadowsocksTransportConfig` (миграция
+`20260712120000`), `User.trojanPassword`/`User.shadowsocksUserKey`.
+`store/connection-config.ts::issueConnectionConfig()` больше не отклоняет
+non-vless endpoint — диспатчит по `protocol`. Admin API
+(`POST /api/admin/endpoints`) принимает protocol-specific поля
+(`trojanSni`/`ssServerKey`/...) вместо жёстко required REALITY-полей —
+`store/endpoints.ts::registerEndpoint()` валидирует нужный набор по
+`protocol`. Новые `GET /api/admin/trojan-clients`/`shadowsocks-clients` —
+источник правды для `sync-clients.sh`, тот же auth-паттерн (fleet-sync-token
+или admin-сессия), что и `vless-clients`.
+
+Живой прогон на `57.128.220.83` (тот же хост, что control-plane + рабочая
+VLESS-нода — намеренно, см. обсуждение с пользователем: "можем ли мы на
+одном сервере поднять несколько соединений с клиентом" — да, три inbound'а
+одного xray-core процесса на разных портах, это и есть модель из
+`docs/NETWORK_INTELLIGENCE.md`, раздел 5):
+
+1. Захвачен текущий deploy (rsync всего репо, `docker compose --profile
+   tools run migrate`, `up --build -d`) — backend/frontend/worker
+   передеплоены с новым кодом без утери текущего состояния БД.
+2. Существующий VLESS-инбаунд (`inbounds[0]` в `/etc/xray-fr-test-1/config.json`)
+   НЕ тронут — Trojan (`:8446`) и Shadowsocks-2022 (`:8447`) добавлены как
+   новые `inbounds[]`-записи поверх, `docker rm -f && docker run` с
+   дополнительными `-p` и volume-мостами для self-signed сертификата.
+   Restart уронил активные VLESS-подключения на секунду-две — тот же
+   принятый trade-off, что и `sync-clients.sh` (Decision 025).
+3. Две новые `Endpoint`-записи (Trojan, Shadowsocks-2022) заведены прямым
+   `INSERT` в БД (тот же `poolCode`/`ipAddress`/`provider`, что у
+   существующей VLESS-записи) — не через Admin API, чтобы не городить
+   auth-сессию ради одноразовой ручной регистрации; для новых нод
+   `provision-node.sh` делает это через настоящий API-путь.
+4. **Живая проверка через локальный xray-core клиент на самом хосте**
+   (`docker run --network host`, SOCKS-инбаунд + Trojan/Shadowsocks
+   outbound, `curl -x socks5h://127.0.0.1:PORT https://...`):
+   Shadowsocks-2022 заработал сразу (`curl` вернул `57.128.220.83`).
+   Trojan сначала дважды провалился — оба провала настоящие баги, не
+   тестового скрипта:
+   - **Баг 1**: self-signed сертификат генерировался только с `CN`, без
+     `subjectAltName`. Go 1.15+ (используется xray-core) жёстко отвергает
+     такие сертификаты (`certificate relies on legacy Common Name field,
+     use SANs instead`) независимо от pinning. Фикс: `-addext
+     "subjectAltName=DNS:<sni>"` при генерации (и в `provision-node.sh`, и
+     вручную на боевом хосте).
+   - **Баг 2**: `allowInsecure` в актуальном xray-core (`26.3.27`) удалён;
+     правильная замена — `pinnedPeerCertSha256` (единственное число, БЕЗ
+     "Chain" в имени — похожее, но несуществующее имя поля
+     `pinnedPeerCertificateChainSha256` молча игнорируется тем же образом,
+     как игнорируется любой незнакомый JSON-ключ, из-за чего первая попытка
+     с "исправленным" SAN-сертификатом тоже провалилась с тем же TLS-
+     алертом). Формат значения — **hex** (`xray tls hash --cert
+     <pem>`/`openssl x509 -fingerprint -sha256`, без двоеточий, lowercase),
+     не base64, как было изначально реализовано в
+     `TrojanTransportConfig.certSha256`/`connection-config.ts`
+     (задокументировано и переиспользовано в комментариях кода после
+     фикса). После обоих фиксов — `curl` через Trojan SOCKS-туннель вернул
+     `57.128.220.83`, реальный трафик прошёл сквозь весь стек.
+5. Существующий VLESS-инбаунд подтверждён рабочим после всех перезапусков
+   (`nc -zv 127.0.0.1 8443` → succeeded; полный reference-клиент повторно не
+   гонялся — конфиг этого inbound'а не менялся ни разу за весь проход).
+
+Сознательно не сделано в этом проходе:
+
+- `mobile/android-skeleton/VpnTunnelPlugin.kt` по-прежнему не строит
+  trojan/shadowsocks-2022 xray-конфиг (см. Decision 052) — нет
+  Android-тулинга в этой сессии;
+- на хосте остаются два неиспользуемых orphan-контейнера
+  (`simple-dimple-xray-de-test-1`, `-nl-test-1`, порты `8444`/`8445`) —
+  leftover после Decision 047 (Endpoint-записи удалены, контейнеры и
+  crontab-записи sync-clients.sh для них — нет). Не трогались в этом
+  проходе, вне скоупа задачи; стоит отдельно решить retire их или
+  переиспользовать порты;
+- реальный CA-сертификат (домен + Let's Encrypt) для Trojan-ноды не заведён
+  — self-signed + pinning принят как рабочее решение для нод без
+  собственного домена, но он не защищает от активного TLS-fingerprinting
+  так же хорошо, как REALITY (это ограничение самого протокола Trojan без
+  домена, не бага реализации).
+
+Тесты: `buildTrojanConnectionConfig`/`buildTrojanConnectionUri` учитывают
+`certSha256` (hex, опционален — `null` не добавляет query-параметр);
+`registerEndpoint()`/`listTrojanClients`/`listShadowsocksClients` покрыты
+unit-тестами. `npm run typecheck`/`test` backend (299/299) и frontend
+(11/11), `npm run lint` (весь репозиторий) — зелёные.
+
+## Decision 054
+
+Дата: `2026-07-12`
+
+Тема: UI — конфиги серверов (view+copy) в Account и connectivity-инфа за
+"Дополнительные настройки" (задачи #14/#15, продолжение Decision 052/053)
+
+Решение:
+
+- новый экран `AccountServersScreen` (`Screen = "accountServers"`),
+  открывается кнопкой "Конфигурации серверов" из `AccountScreen`: список
+  серверов (`routeSession.servers`, с меткой протокола — VLESS+REALITY /
+  Trojan+TLS / Shadowsocks-2022), по кнопке "Показать конфиг" — лениво
+  запрашивает `connectionConfig` для конкретного `endpointId` через уже
+  существующий чистый `POST /api/routes/resolve` (не через `/api/connect`/
+  `/api/server` — no side effects on session.status), кэширует результат в
+  `useRouteSession.serverConnectionConfigs`, показывает `uri` в
+  read-only textarea + кнопка "Скопировать" (`navigator.clipboard`);
+- новый экран `ServerAdvancedScreen` (`Screen = "serverAdvanced"`),
+  открывается кнопкой "Дополнительные настройки" внизу `ServerScreen`:
+  список серверов с реальным `RouteHealthSnapshot` (`status`, `confidence`,
+  `freshFailureCount`, `dominantFailureReason`, `lastFailureAt`) — те же
+  данные, что уже несколько этапов считает бэкенд и отдаёт в
+  `/api/session`/`/api/routes/resolve`, и что уже показывает admin
+  Ops-экран, но раньше не было пользовательской (не-admin) поверхности для
+  этого;
+- оба экрана — это дополнительные под-экраны, не изменения главного экрана:
+  `ServerScreen`/`AccountScreen` остаются как были, кнопка перехода — внизу
+  списком, без карточек/чисел на самом Home (осознанно, ROADMAP.md —
+  правило "одна большая кнопка", никакого dashboard-клаттера на главном
+  экране);
+- back-навигация для под-экранов теперь контекстная
+  (`accountServers` → `account`, `serverAdvanced` → `server`), а не всегда
+  на `home`, как было раньше для всех остальных экранов — иначе переход
+  Account → Servers → назад перепрыгивал бы сразу на home, минуя сам
+  Account.
+
+Почему:
+
+- прямое продолжение явного запроса пользователя (см. переписку в этой же
+  сессии): "выдача сертификатов каждой конфигурации каждого сервера через
+  настройки пользовательские" + "возможность просто скопировать конфиг" +
+  "инфа реальной возможности соединения ... в настройках после servers
+  через доп настройки";
+- `RouteHealthSnapshot` уже вычисляется и уже отдаётся авторизованному
+  пользователю (не только admin) через `/api/session`/`/api/routes/resolve`
+  — специального backend-эндпоинта не потребовалось, только фронтенд;
+- per-endpoint `connectionConfig` для *произвольного* (не только активного)
+  сервера уже был доступен через `POST /api/routes/resolve` с
+  `manualEndpointId` (использовался только внутри auto-fallback executor'а,
+  `fetchCandidateConnectionConfig` в `useRouteSession.ts`) — переиспользован
+  как есть, а не продублирован новым эндпоинтом.
+
+Не сделано в этом проходе:
+
+- нет unit/компонентных тестов на новые экраны — в этом фронтенде вообще
+  нет компонентных тестов ни для одного существующего экрана (только
+  `lib/__tests__`), поэтому решено не вводить первый компонентный тест
+  именно здесь без отдельного решения про test-инфраструктуру фронтенда;
+- группировка "один сервер — несколько протоколов" в один визуальный блок
+  не сделана: `ServerOption` в текущей модели данных — это один `Endpoint` =
+  один протокол (см. Decision 052/053), поэтому мультипротокольный физический
+  хост сейчас отображается как несколько соседних карточек с одинаковым
+  регионом/лейблом — по разным строкам, а не под одним заголовком.
+
+Тесты: `npm run typecheck`/`test` фронтенда — зелёные (typecheck без ошибок,
+существующие 11/11 lib-тестов проходят без изменений).
+
+## Decision 055: два живых бага в native auto-fallback (кап попыток, протокол) + Trojan/Shadowsocks-2022 добавлены в `VpnTunnelPlugin.kt` (собрано, не проверено на устройстве) + протокол виден в списке выбора сервера
+
+Дата: `2026-07-12`
+
+Тема: код-ревью нашёл, что кап shortlist, поднятый в Decision 052 с 4 до 5
+(чтобы новая стадия `same_protocol_fallback` не вытесняла
+diversity/emergency-кандидатов), реально не работал на native-стороне —
+клиентский executor обрубал список на 4-м кандидате. Разбор этого бага
+вскрыл второй, тесно связанный: с тех пор как сервера стали
+многопротокольными (Decision 052/053), shortlist из 5 позиций мог включать
+Trojan/Shadowsocks-2022 кандидатов, которые `VpnTunnelPlugin.kt` не умел
+собирать вообще (см. "сознательно не сделано" в Decision 052) — по
+запросу пользователя эта же сессия закрыла и это.
+
+Что было не так:
+
+- **Баг 1 (`useRouteSession.ts`)**: `connectFallback.ts` — client-side
+  executor, который проходит по `routePolicy.shortlist` при native-подключении
+  (Шаг 3, `PRIORITY_PLAN.md`) — имеет `defaultMaxAttempts = 4`, зашитый до
+  Decision 052. Единственный вызов `connectWithFallback()` в
+  `useRouteSession.ts` не передавал `maxAttempts` явно, поэтому дефолт
+  молча резал список на 4 элемента. Пятый кандидат — как правило
+  `emergency_fallback`, самый важный резервный случай — на native-стороне
+  никогда не пробовался, хотя backend честно клал его в shortlist;
+- **Баг 2 (`VpnTunnelPlugin.kt`)**: `buildXrayConfig()`/`parseTunnelParams()`
+  жёстко читали только VLESS+REALITY-поля и всегда строили `protocol:
+  "vless"` outbound, независимо от `config.protocol`. Trojan/Shadowsocks-2022
+  конфиг от backend либо получал ошибку конфигурации от Xray-core, либо
+  (при частичном совпадении полей) тихо собирался как VLESS — до фикса
+  протокольный fallback реально работал только в browser-only PWA и через
+  reference-клиенты, не через нативную Android-кнопку "Подключить";
+- отдельно: список выбора сервера (`ServerScreen.tsx`) не показывал
+  протокол вообще — мультипротокольный хост (три `Endpoint` с одинаковым
+  `label`/`region`, разным `protocol`) в списке выглядел как несколько
+  одинаковых на вид карточек, разница видна только по факту клика.
+
+Решение:
+
+- `useRouteSession.ts`: `connectWithFallback()` теперь получает
+  `maxAttempts: nativeShortlist.length` явно — длина реального списка от
+  backend, а не хардкод на клиенте;
+- там же: shortlist для native-fallback дополнительно фильтруется до
+  `protocol === "vless"` (`nativeShortlist`) — временная страховка, см.
+  ниже;
+- `VpnTunnelPlugin.kt`: `TunnelParams` стал sealed-классом с тремя
+  вариантами (`Vless`/`Trojan`/`Shadowsocks`), `parseTunnelParams()`
+  диспатчит по `config.protocol`, `buildXrayConfig()` строит
+  protocol-specific outbound:
+  - Trojan — `pinnedPeerCertSha256` (hex, единственное число), тот же
+    формат, что уже live-verified на сервере в Decision 053 (не
+    `allowInsecure`, не `pinnedPeerCertificateChainSha256`);
+  - Shadowsocks-2022 — пароль клиента `serverKey:userKey`, та же
+    multi-user-схема, что `buildShadowsocksConnectionUri()` в
+    `backend/src/connection-config.ts`;
+  - обе ветки собраны по документированной xray-core outbound-схеме и
+    проверены компиляцией (`./gradlew :app:compileDebugKotlin` с JDK 21,
+    `BUILD SUCCESSFUL`), но **не запускались на реальном
+    устройстве/эмуляторе** — в этой сессии не было `adb`/эмулятора, только
+    компилятор. Синхронизировано в `mobile/android-skeleton/VpnTunnelPlugin.kt`
+    (эталонная копия для `npx cap add android`);
+  - именно поэтому фильтр `protocol === "vless"` в `useRouteSession.ts` не
+    снят вместе с добавлением поддержки — до живой проверки Trojan/
+    Shadowsocks-2022 на устройстве native auto-fallback пользователя не
+    должен зависеть от непроверенной ветки;
+- `formatters.ts`: новая `formatProtocolLabel()` (вынесена из локальной
+  `AccountServersScreen.tsx::protocolLabel()`, добавленной в Decision 054);
+  `ServerScreen.tsx` теперь тоже показывает протокол в списке выбора
+  (`region · protocol · latency`), используя ту же функцию — раньше
+  протокол был виден только на экране "Конфигурации серверов".
+
+Живая проверка (frontend, не Android): локально подняты backend+frontend,
+накачены недостающие миграции (`20260712120000`/`20260712130000`, до этого
+их не было в локальной dev-БД), заведён тестовый multi-protocol пул через
+`POST /api/admin/endpoints` (vless/trojan/shadowsocks-2022 на одном IP) —
+подтверждено вживую в браузере: список выбора сервера показывает протокол
+для каждой карточки, экран "Конфигурации серверов" по-прежнему выдаёт и
+даёт скопировать рабочий `trojan://...` URI с паролем/sni/fp/alpn.
+
+Не сделано в этом проходе:
+
+- Trojan/Shadowsocks-2022 outbound в `VpnTunnelPlugin.kt` не проверен на
+  реальном устройстве — следующий шаг с доступным Android-тулингом: собрать
+  APK, подключиться к обеим новым нодам на `57.128.220.83`, снять фильтр
+  `protocol === "vless"` в `useRouteSession.ts` после успешной живой
+  проверки (тот же принцип, что закрывал Decision 052 → 053 для серверной
+  стороны);
+- группировка "один сервер — несколько протоколов" в один визуальный блок
+  по-прежнему не сделана (см. Decision 054) — протокол в списке теперь
+  виден текстом, но карточки остаются раздельными.
+
+Тесты: `npm run typecheck`/`test` frontend (11/11, без изменений в
+существующих сценариях) — зелёные. `./gradlew :app:compileDebugKotlin`
+(JDK 21, `--offline`) — `BUILD SUCCESSFUL`, синтаксис/типы Kotlin-кода
+подтверждены реальным компилятором, но не заменяют живую проверку на
+устройстве.
+
 ## Правило обновления
 
 Добавляем новую запись, когда принимается решение, которое:

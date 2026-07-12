@@ -21,4 +21,11 @@ export type AuthResponse = {
   auth: AuthSession;
 };
 
-export type Screen = "home" | "server" | "account" | "ops" | "admin";
+export type Screen =
+  | "home"
+  | "server"
+  | "serverAdvanced"
+  | "account"
+  | "accountServers"
+  | "ops"
+  | "admin";

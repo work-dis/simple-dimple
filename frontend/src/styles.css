@@ -10,11 +10,21 @@
   box-sizing: border-box;
 }
 
+html {
+  /* Резервируем место под скроллбар с обеих сторон: без этого на десктопе
+     появление/исчезновение скроллбара (высокие экраны Ops/Admin vs Home)
+     сдвигает центрированную карточку по горизонтали — «дёргание». */
+  scrollbar-gutter: stable both-edges;
+}
+
 html,
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  /* dvh вместо vh: в мобильном браузере скрытие адресной строки меняет vh
+     и центрированный контент прыгает; dvh отслеживает реальную высоту. */
+  min-height: 100dvh;
   /* В упакованном (Capacitor) приложении нет браузерного chrome, который
      обычно гасит resistance/bounce за нас — без этого потягивание экрана
      пальцем выглядит как обычная веб-страница, а не нативный экран. */
@@ -43,8 +53,11 @@ input {
 
 .shell {
   min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
-  place-items: center;
+  /* safe center: обычный center при карточке выше вьюпорта (Ops/Admin)
+     обрезает её верх без возможности доскроллить; safe откатывается к start. */
+  place-items: safe center;
   padding: 24px;
   /* safe-area-inset — отступ под "чёлку"/home-indicator в нативной обвязке
      (требует viewport-fit=cover в index.html); в браузере env() просто 0. */
@@ -326,6 +339,22 @@ input {
 .deviceCard strong {
   display: block;
   margin-top: 6px;
+}
+
+.serverConfigCard {
+  display: grid;
+  gap: 10px;
+}
+
+.configReveal {
+  display: grid;
+  gap: 8px;
+}
+
+.configUri {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  resize: none;
 }
 
 .opsSection {

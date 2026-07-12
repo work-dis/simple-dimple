@@ -21,6 +21,7 @@ const autoFallbackAssignmentReasons = new Set([
   "network_ranking_primary",
   "baseline_pool_priority",
   "route_health_adjusted_primary",
+  "same_protocol_fallback",
   "transport_diagnostic_fallback",
   "provider_diversity_fallback",
   "asn_diversity_fallback",

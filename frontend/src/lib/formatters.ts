@@ -28,6 +28,8 @@ export function formatAssignmentReason(
       return "Базовый приоритет пула";
     case "route_health_adjusted_primary":
       return "Primary с health-adjustment";
+    case "same_protocol_fallback":
+      return "Fallback: тот же протокол, другой сервер";
     case "transport_diagnostic_fallback":
       return "Диагностический fallback";
     case "provider_diversity_fallback":
@@ -245,6 +247,23 @@ export function formatFallbackTier(
       return "Baseline";
     default:
       return "—";
+  }
+}
+
+// Одна и та же метка для ServerScreen (выбор сервера) и AccountServersScreen
+// (просмотр/копирование конфига) — мультипротокольный хост показывается
+// несколькими карточками с одинаковыми label/region, отличить их можно
+// только по протоколу.
+export function formatProtocolLabel(protocol: string): string {
+  switch (protocol) {
+    case "vless":
+      return "VLESS + REALITY";
+    case "trojan":
+      return "Trojan + TLS";
+    case "shadowsocks-2022":
+      return "Shadowsocks-2022";
+    default:
+      return protocol;
   }
 }
 

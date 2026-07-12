@@ -5,7 +5,15 @@ import { StatusBar, Style } from "@capacitor/status-bar";
 import type {
   Screen,
 } from "./types";
-import { AccountScreen, AdminScreen, HomeScreen, OpsScreen, ServerScreen } from "./components";
+import {
+  AccountScreen,
+  AccountServersScreen,
+  AdminScreen,
+  HomeScreen,
+  OpsScreen,
+  ServerAdvancedScreen,
+  ServerScreen,
+} from "./components";
 import {
   useAdminEndpoints,
   useAdminUsers,
@@ -145,18 +153,39 @@ function App() {
 
   const isConnected = routeSession.session?.status === "connected";
   const isLoading = routeSession.isLoading || authAccount.isLoading;
-  const isSubmitting =
-    routeSession.isSubmitting ||
-    authAccount.isSubmitting ||
-    adminUsers.isSubmitting ||
-    adminEndpoints.isSubmitting ||
-    routeDecisionOps.isLoading;
+  // Каждому экрану — только его собственный busy-флаг. Раньше здесь был один
+  // глобальный isSubmitting (OR всех пяти хуков): любой фоновый запрос дизейблил
+  // все кнопки на всех экранах, и из-за transition: opacity у button весь UI
+  // заметно «мигал» при каждом запросе.
+  const homeSubmitting = routeSession.isSubmitting || authAccount.isSubmitting;
+  const serverSubmitting = routeSession.isSubmitting;
+  const adminSubmitting = adminUsers.isSubmitting;
+  const opsSubmitting = routeDecisionOps.isLoading || adminEndpoints.isSubmitting;
+  const accountSubmitting = authAccount.isSubmitting;
+  const screenSubmitting =
+    screen === "home"
+      ? homeSubmitting
+      : screen === "server" || screen === "serverAdvanced"
+        ? serverSubmitting
+        : screen === "admin"
+          ? adminSubmitting
+          : screen === "ops"
+            ? opsSubmitting
+            : accountSubmitting;
 
   const showBack =
     screen === "server" ||
+    screen === "serverAdvanced" ||
     screen === "account" ||
+    screen === "accountServers" ||
     screen === "ops" ||
     screen === "admin";
+
+  // Под-экраны ("Дополнительные настройки", "Конфигурации серверов") должны
+  // возвращать на свой родительский экран, а не сразу на home — иначе
+  // навигация Account → Servers → назад перепрыгивала бы через сам Account.
+  const backTarget: Screen =
+    screen === "serverAdvanced" ? "server" : screen === "accountServers" ? "account" : "home";
 
   /* ──────────── Render ──────────── */
 
@@ -177,8 +206,8 @@ function App() {
           </p>
           {showBack && (
             <ScreenBack
-              onBack={() => setScreen("home")}
-              disabled={isSubmitting}
+              onBack={() => setScreen(backTarget)}
+              disabled={screenSubmitting}
             />
           )}
         </div>
@@ -191,7 +220,7 @@ function App() {
             authIsAuthenticated={authAccount.isAuthenticated}
             isAdmin={authAccount.isAdmin}
             isLoading={isLoading}
-            isSubmitting={isSubmitting}
+            isSubmitting={homeSubmitting}
             onToggleConnection={routeSession.toggleConnection}
             onNavigate={setScreen}
           />
@@ -202,8 +231,16 @@ function App() {
             session={routeSession.session}
             servers={routeSession.servers}
             routePolicy={routeSession.routePolicy}
-            isSubmitting={isSubmitting}
+            isSubmitting={serverSubmitting}
             onChangeServer={changeServer}
+            onOpenAdvanced={() => setScreen("serverAdvanced")}
+          />
+        )}
+
+        {screen === "serverAdvanced" && (
+          <ServerAdvancedScreen
+            servers={routeSession.servers}
+            routeHealth={routeSession.routeHealth}
           />
         )}
 
@@ -212,7 +249,7 @@ function App() {
             auth={authAccount.auth}
             account={authAccount.account}
             adminUsers={adminUsers.adminUsers}
-            isSubmitting={isSubmitting}
+            isSubmitting={adminSubmitting}
             onToggleUserAdmin={adminUsers.toggleUserAdmin}
             onToggleImmediateRouting={adminUsers.toggleImmediateRouting}
             onToggleDigestRouting={adminUsers.toggleDigestRouting}
@@ -230,7 +267,7 @@ function App() {
             opsAlertEscalationPreviews={routeDecisionOps.opsAlertEscalationPreviews}
             opsAlertDeliveries={routeDecisionOps.opsAlertDeliveries}
             adminEndpoints={adminEndpoints.adminEndpoints}
-            isSubmitting={isSubmitting}
+            isSubmitting={opsSubmitting}
             onReload={routeDecisionOps.loadRouteDecisionOps}
             onAcknowledgeAlert={routeDecisionOps.acknowledgeOpsAlert}
             onSnoozeAlert={routeDecisionOps.snoozeOpsAlert}
@@ -254,7 +291,7 @@ function App() {
             displayNameDraft={authAccount.displayNameDraft}
             contactDraft={authAccount.contactDraft}
             isLoading={isLoading}
-            isSubmitting={isSubmitting}
+            isSubmitting={accountSubmitting}
             loginDraft={authAccount.loginDraft}
             passwordDraft={authAccount.passwordDraft}
             registerNameDraft={authAccount.registerNameDraft}
@@ -280,6 +317,16 @@ function App() {
             onRegisterWithPassword={authAccount.registerWithPassword}
             onRequestVerificationCode={authAccount.requestVerificationCode}
             onVerifyCodeAuth={authAccount.verifyCodeAuth}
+            onOpenServersConfig={() => setScreen("accountServers")}
+          />
+        )}
+
+        {screen === "accountServers" && (
+          <AccountServersScreen
+            servers={routeSession.servers}
+            serverConnectionConfigs={routeSession.serverConnectionConfigs}
+            loadingServerConfigId={routeSession.loadingServerConfigId}
+            onLoadConfig={routeSession.loadServerConnectionConfig}
           />
         )}
 

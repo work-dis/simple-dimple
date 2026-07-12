@@ -193,4 +193,100 @@ describe("buildRoutePolicy failure-domain hardening", () => {
     expect(policy.shortlist[1]?.endpointId).toBe("ep-3");
     expect(policy.trace.usedDegradedAvoidance).toBe(true);
   });
+
+  it("tries another server on the same protocol before switching protocol (Decision 052)", () => {
+    const servers: ServerOption[] = [
+      createServer({
+        id: "ep-1",
+        label: "Frankfurt Alpha",
+        provider: "Provider A",
+        asn: 64500,
+        ipAddress: "203.0.113.10",
+        poolCode: "fra-a",
+        region: "Germany",
+        countryCode: "DE",
+        protocol: "vless",
+        transportProfile: "reality"
+      }),
+      createServer({
+        id: "ep-2",
+        label: "Warsaw Vless",
+        provider: "Provider B",
+        asn: 64510,
+        ipAddress: "203.0.113.20",
+        poolCode: "waw-a",
+        region: "Poland",
+        countryCode: "PL",
+        protocol: "vless",
+        transportProfile: "reality"
+      }),
+      createServer({
+        id: "ep-3",
+        label: "Amsterdam Trojan",
+        provider: "Provider C",
+        asn: 64520,
+        ipAddress: "203.0.113.30",
+        poolCode: "ams-a",
+        region: "Netherlands",
+        countryCode: "NL",
+        protocol: "trojan",
+        transportProfile: "tls"
+      })
+    ];
+
+    const policy = buildRoutePolicy({
+      servers,
+      currentAssignmentEndpointId: null,
+      currentAssignmentReason: null,
+      lastKnownGoodEndpointId: null,
+      hasNetworkRanking: true,
+      routeHealthSnapshots: []
+    });
+
+    expect(policy.shortlist[0]?.endpointId).toBe("ep-1");
+    expect(policy.shortlist[1]?.endpointId).toBe("ep-2");
+    expect(policy.shortlist[1]?.assignmentReason).toBe("same_protocol_fallback");
+    expect(policy.shortlist[2]?.endpointId).toBe("ep-3");
+  });
+
+  it("falls through to a different protocol when no other server shares the primary's protocol", () => {
+    const servers: ServerOption[] = [
+      createServer({
+        id: "ep-1",
+        label: "Frankfurt Alpha",
+        provider: "Provider A",
+        asn: 64500,
+        ipAddress: "203.0.113.10",
+        poolCode: "fra-a",
+        region: "Germany",
+        countryCode: "DE",
+        protocol: "vless",
+        transportProfile: "reality"
+      }),
+      createServer({
+        id: "ep-2",
+        label: "Warsaw Trojan",
+        provider: "Provider B",
+        asn: 64510,
+        ipAddress: "203.0.113.20",
+        poolCode: "waw-a",
+        region: "Poland",
+        countryCode: "PL",
+        protocol: "trojan",
+        transportProfile: "tls"
+      })
+    ];
+
+    const policy = buildRoutePolicy({
+      servers,
+      currentAssignmentEndpointId: null,
+      currentAssignmentReason: null,
+      lastKnownGoodEndpointId: null,
+      hasNetworkRanking: true,
+      routeHealthSnapshots: []
+    });
+
+    expect(policy.shortlist[1]?.endpointId).toBe("ep-2");
+    expect(policy.shortlist[1]?.assignmentReason).toBe("transport_diagnostic_fallback");
+  });
 });

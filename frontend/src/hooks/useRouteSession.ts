@@ -93,6 +93,14 @@ export function useRouteSession({
     useState<ConnectionConfigSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Задача #14 (PRIORITY_PLAN.md) — конфиги остальных (не активных) серверов,
+  // запрашиваются лениво по требованию с экрана "Конфигурации серверов" в
+  // Account, а не все разом при загрузке сессии. Кэш по endpointId, чтобы
+  // повторное открытие того же сервера не дёргало /api/routes/resolve снова.
+  const [serverConnectionConfigs, setServerConnectionConfigs] = useState<
+    Record<string, ConnectionConfigSummary | null>
+  >({});
+  const [loadingServerConfigId, setLoadingServerConfigId] = useState<string | null>(null);
 
   // Best-effort native tunnel side effect (Этап 2b, PRIORITY_PLAN.md). Backend
   // session.status stays the source of truth (Decision 021) — in the plain PWA
@@ -141,6 +149,7 @@ export function useRouteSession({
     setRouteHealth([]);
     setRoutePolicy(null);
     setConnectionConfig(null);
+    setServerConnectionConfigs({});
     setIsLoading(false);
   }
 
@@ -187,16 +196,37 @@ export function useRouteSession({
       setRoutePolicy(data.routePolicy);
       setConnectionConfig(data.connectionConfig ?? null);
 
+      // Список серверов из свежего ответа, а не из замыкания: `servers` здесь —
+      // снапшот стейта на момент клика, и после await-ов он может не содержать
+      // сервера, на который нас переключил fallback (submitProbeReport тогда
+      // молча не отправлялся).
+      let knownServers = data.servers ?? servers;
+      if (data.servers) {
+        setServers(data.servers);
+      }
+
       let finalActiveServerId = data.session.activeServerId;
 
       if (data.session.status === "connected" && data.connectionConfig && isNativeTunnelAvailable()) {
         // Шаг 3 (PRIORITY_PLAN.md) — recommended-кандидат может реально не
         // подняться на устройстве; проходим по routePolicy.shortlist сами
         // вместо того, чтобы требовать ручного похода на экран Server.
-        const outcome = await connectWithFallback(data.routePolicy.shortlist, data.connectionConfig, {
+        // VpnTunnelPlugin.kt теперь умеет собирать trojan/shadowsocks-2022
+        // outbound (Decision 055), но это никогда не проверялось на реальном
+        // устройстве (нет adb/эмулятора в текущей среде разработки) — до
+        // живой проверки фильтр остаётся страховкой: native fallback идёт
+        // только по vless, чтобы непроверенная ветка не сжигала попытки
+        // впустую на реальном auto-fallback пользователя. Снять фильтр после
+        // живой проверки Trojan/Shadowsocks-2022 на устройстве.
+        const nativeShortlist = data.routePolicy.shortlist.filter((candidate) => candidate.protocol === "vless");
+
+        const outcome = await connectWithFallback(nativeShortlist, data.connectionConfig, {
           attemptTunnel: connectNativeTunnel,
           fetchCandidateConfig: fetchCandidateConnectionConfig,
           reportFailure: reportCandidateFailure,
+          // Не даём client-side дефолту (connectFallback.ts) молча срезать
+          // хвост shortlist, если backend поднимет кап ещё раз (Decision 052).
+          maxAttempts: nativeShortlist.length,
         });
 
         if (!outcome.ok) {
@@ -218,6 +248,10 @@ export function useRouteSession({
           setRouteHealth(switched.routeHealth);
           setRoutePolicy(switched.routePolicy);
           setConnectionConfig(switched.connectionConfig ?? null);
+          if (switched.servers) {
+            knownServers = switched.servers;
+            setServers(switched.servers);
+          }
           finalActiveServerId = switched.session.activeServerId;
         }
       } else {
@@ -225,7 +259,7 @@ export function useRouteSession({
       }
 
       if (data.session.status === "connected") {
-        const nextServer = servers.find((server) => server.id === finalActiveServerId);
+        const nextServer = knownServers.find((server) => server.id === finalActiveServerId);
         if (nextServer) void submitProbeReport(nextServer);
       }
     } catch (nextError) {
@@ -301,6 +335,22 @@ export function useRouteSession({
     }
   }
 
+  // Тот же чистый resolve-контракт, что и fetchCandidateConnectionConfig
+  // выше — не трогает session.status, просто достаёт connectionConfig для
+  // произвольного endpointId по требованию (кнопка "Показать конфиг").
+  async function loadServerConnectionConfig(endpointId: string) {
+    if (endpointId in serverConnectionConfigs) {
+      return;
+    }
+    setLoadingServerConfigId(endpointId);
+    try {
+      const config = await fetchCandidateConnectionConfig(endpointId);
+      setServerConnectionConfigs((prev) => ({ ...prev, [endpointId]: config }));
+    } finally {
+      setLoadingServerConfigId((current) => (current === endpointId ? null : current));
+    }
+  }
+
   const activeServer = servers.find((server) => server.id === session?.activeServerId);
 
   return {
@@ -311,6 +361,8 @@ export function useRouteSession({
     routeHealth,
     routePolicy,
     connectionConfig,
+    serverConnectionConfigs,
+    loadingServerConfigId,
     isLoading,
     isSubmitting,
     loadSession,
@@ -318,5 +370,6 @@ export function useRouteSession({
     toggleConnection,
     changeServer,
     refreshServerLatency,
+    loadServerConnectionConfig,
   };
 }

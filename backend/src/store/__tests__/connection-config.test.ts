@@ -16,8 +16,10 @@ const authenticatedAuth: AuthSessionSummary = {
 function createPrismaStub(input: {
   endpoint: Record<string, unknown> | null;
   vlessUuid?: string | null;
+  trojanPassword?: string | null;
+  shadowsocksUserKey?: string | null;
 }) {
-  const updateCalls: Array<{ where: unknown; data: { vlessUuid: string } }> = [];
+  const updateCalls: Array<{ where: unknown; data: Record<string, string> }> = [];
 
   return {
     prisma: {
@@ -25,10 +27,17 @@ function createPrismaStub(input: {
         findUnique: async () => input.endpoint
       },
       user: {
-        findUnique: async () => (input.endpoint ? { vlessUuid: input.vlessUuid ?? null } : null),
-        update: async ({ where, data }: { where: unknown; data: { vlessUuid: string } }) => {
+        findUnique: async () =>
+          input.endpoint
+            ? {
+                vlessUuid: input.vlessUuid ?? null,
+                trojanPassword: input.trojanPassword ?? null,
+                shadowsocksUserKey: input.shadowsocksUserKey ?? null
+              }
+            : null,
+        update: async ({ where, data }: { where: unknown; data: Record<string, string> }) => {
           updateCalls.push({ where, data });
-          return { vlessUuid: data.vlessUuid };
+          return data;
         }
       }
     },
@@ -48,6 +57,38 @@ const vlessEndpoint = {
     sni: "www.microsoft.com",
     fingerprint: "chrome",
     flow: "xtls-rprx-vision"
+  },
+  trojanTransportConfig: null,
+  shadowsocksTransportConfig: null
+};
+
+const trojanEndpoint = {
+  id: "nl-ams-1",
+  label: "Amsterdam Breeze",
+  ipAddress: "203.0.113.20",
+  protocol: "trojan",
+  transportConfig: null,
+  trojanTransportConfig: {
+    port: 8443,
+    sni: "www.microsoft.com",
+    fingerprint: "chrome",
+    alpn: "h2,http/1.1",
+    certSha256: null
+  },
+  shadowsocksTransportConfig: null
+};
+
+const shadowsocksEndpoint = {
+  id: "pl-waw-1",
+  label: "Warsaw Pulse",
+  ipAddress: "203.0.113.30",
+  protocol: "shadowsocks-2022",
+  transportConfig: null,
+  trojanTransportConfig: null,
+  shadowsocksTransportConfig: {
+    port: 8388,
+    method: "2022-blake3-aes-128-gcm",
+    serverKey: "c2VydmVyLWtleQ"
   }
 };
 
@@ -78,8 +119,8 @@ describe("createConnectionConfigStore.issueConnectionConfig", () => {
     expect(await store.issueConnectionConfig(authenticatedAuth, "de-fra-1")).toBeNull();
   });
 
-  it("returns null when the endpoint protocol is not vless", async () => {
-    const { prisma } = createPrismaStub({ endpoint: { ...vlessEndpoint, protocol: "trojan" } });
+  it("returns null when the endpoint protocol is unknown", async () => {
+    const { prisma } = createPrismaStub({ endpoint: { ...vlessEndpoint, protocol: "wireguard" } });
     const store = createConnectionConfigStore(prisma as never);
 
     expect(await store.issueConnectionConfig(authenticatedAuth, "de-fra-1")).toBeNull();
@@ -92,10 +133,13 @@ describe("createConnectionConfigStore.issueConnectionConfig", () => {
     const result = await store.issueConnectionConfig(authenticatedAuth, "de-fra-1");
 
     expect(result).not.toBeNull();
+    expect(result!.protocol).toBe("vless");
     expect(updateCalls).toHaveLength(1);
-    expect(result!.params.uuid).toBe(updateCalls[0].data.vlessUuid);
-    expect(result!.params.publicKey).toBe(vlessEndpoint.transportConfig.publicKey);
-    expect(result!.uri.startsWith(`vless://${result!.params.uuid}@127.0.0.1:8443?`)).toBe(true);
+    if (result!.protocol === "vless") {
+      expect(result!.params.uuid).toBe(updateCalls[0].data.vlessUuid);
+      expect(result!.params.publicKey).toBe(vlessEndpoint.transportConfig.publicKey);
+      expect(result!.uri.startsWith(`vless://${result!.params.uuid}@127.0.0.1:8443?`)).toBe(true);
+    }
   });
 
   it("reuses the existing client uuid instead of generating a new one", async () => {
@@ -108,6 +152,73 @@ describe("createConnectionConfigStore.issueConnectionConfig", () => {
     const result = await store.issueConnectionConfig(authenticatedAuth, "de-fra-1");
 
     expect(updateCalls).toHaveLength(0);
-    expect(result!.params.uuid).toBe("ef804460-59d5-48af-afe8-da294499651b");
+    expect(result!.protocol === "vless" && result!.params.uuid).toBe("ef804460-59d5-48af-afe8-da294499651b");
+  });
+
+  it("returns null for a trojan endpoint with no TrojanTransportConfig", async () => {
+    const { prisma } = createPrismaStub({ endpoint: { ...trojanEndpoint, trojanTransportConfig: null } });
+    const store = createConnectionConfigStore(prisma as never);
+
+    expect(await store.issueConnectionConfig(authenticatedAuth, "nl-ams-1")).toBeNull();
+  });
+
+  it("generates and persists a trojan password on first issuance", async () => {
+    const { prisma, updateCalls } = createPrismaStub({ endpoint: trojanEndpoint, trojanPassword: null });
+    const store = createConnectionConfigStore(prisma as never);
+
+    const result = await store.issueConnectionConfig(authenticatedAuth, "nl-ams-1");
+
+    expect(result).not.toBeNull();
+    expect(result!.protocol).toBe("trojan");
+    expect(updateCalls).toHaveLength(1);
+    if (result!.protocol === "trojan") {
+      expect(result!.params.password).toBe(updateCalls[0].data.trojanPassword);
+      expect(result!.uri.startsWith(`trojan://${result!.params.password}@203.0.113.20:8443?`)).toBe(true);
+    }
+  });
+
+  it("reuses the existing trojan password instead of generating a new one", async () => {
+    const { prisma, updateCalls } = createPrismaStub({ endpoint: trojanEndpoint, trojanPassword: "existing-pass" });
+    const store = createConnectionConfigStore(prisma as never);
+
+    const result = await store.issueConnectionConfig(authenticatedAuth, "nl-ams-1");
+
+    expect(updateCalls).toHaveLength(0);
+    expect(result!.protocol === "trojan" && result!.params.password).toBe("existing-pass");
+  });
+
+  it("returns null for a shadowsocks-2022 endpoint with no ShadowsocksTransportConfig", async () => {
+    const { prisma } = createPrismaStub({ endpoint: { ...shadowsocksEndpoint, shadowsocksTransportConfig: null } });
+    const store = createConnectionConfigStore(prisma as never);
+
+    expect(await store.issueConnectionConfig(authenticatedAuth, "pl-waw-1")).toBeNull();
+  });
+
+  it("generates and persists a shadowsocks user key on first issuance", async () => {
+    const { prisma, updateCalls } = createPrismaStub({ endpoint: shadowsocksEndpoint, shadowsocksUserKey: null });
+    const store = createConnectionConfigStore(prisma as never);
+
+    const result = await store.issueConnectionConfig(authenticatedAuth, "pl-waw-1");
+
+    expect(result).not.toBeNull();
+    expect(result!.protocol).toBe("shadowsocks-2022");
+    expect(updateCalls).toHaveLength(1);
+    if (result!.protocol === "shadowsocks-2022") {
+      expect(result!.params.userKey).toBe(updateCalls[0].data.shadowsocksUserKey);
+      expect(result!.params.serverKey).toBe("c2VydmVyLWtleQ");
+    }
+  });
+
+  it("reuses the existing shadowsocks user key instead of generating a new one", async () => {
+    const { prisma, updateCalls } = createPrismaStub({
+      endpoint: shadowsocksEndpoint,
+      shadowsocksUserKey: "existing-user-key"
+    });
+    const store = createConnectionConfigStore(prisma as never);
+
+    const result = await store.issueConnectionConfig(authenticatedAuth, "pl-waw-1");
+
+    expect(updateCalls).toHaveLength(0);
+    expect(result!.protocol === "shadowsocks-2022" && result!.params.userKey).toBe("existing-user-key");
   });
 });

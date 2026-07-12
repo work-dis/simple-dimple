@@ -100,7 +100,11 @@ export type EndpointAssignmentSummary = {
   expiresAt: string | null;
 };
 
-export type ConnectionConfigSummary = {
+// Протокольная diversity (ROADMAP.md, Этап 6 / DECISIONS.md Decision 052):
+// discriminated union по protocol вместо единственной vless-формы — каждый
+// протокол несёт свой набор transport-параметров, а connection-config.ts и
+// store/connection-config.ts переключаются на нужный вариант по endpoint.protocol.
+export type VlessConnectionConfigSummary = {
   endpointId: string;
   protocol: "vless";
   security: "reality";
@@ -116,6 +120,42 @@ export type ConnectionConfigSummary = {
     shortId: string;
   };
 };
+
+export type TrojanConnectionConfigSummary = {
+  endpointId: string;
+  protocol: "trojan";
+  security: "tls";
+  uri: string;
+  params: {
+    password: string;
+    address: string;
+    port: number;
+    sni: string;
+    fingerprint: string;
+    alpn: string;
+    // base64(SHA-256(DER cert)) — см. Decision 053, DECISIONS.md.
+    certSha256: string | null;
+  };
+};
+
+export type ShadowsocksConnectionConfigSummary = {
+  endpointId: string;
+  protocol: "shadowsocks-2022";
+  security: "none";
+  uri: string;
+  params: {
+    method: string;
+    serverKey: string;
+    userKey: string;
+    address: string;
+    port: number;
+  };
+};
+
+export type ConnectionConfigSummary =
+  | VlessConnectionConfigSummary
+  | TrojanConnectionConfigSummary
+  | ShadowsocksConnectionConfigSummary;
 
 export type LastKnownGoodRouteSummary = {
   id: string;
@@ -231,6 +271,10 @@ export type AdminEndpointSummary = {
   createdAt: string;
 };
 
+// Протокольная diversity (Decision 052): registerEndpoint() диспатчит по
+// protocol, поэтому за пределами общих полей body несёт три группы
+// опциональных protocol-specific полей — только одна из них реально
+// требуется, в зависимости от protocol (see store/endpoints.ts).
 export type RegisterAdminEndpointBody = {
   label?: string;
   ipAddress?: string;
@@ -246,11 +290,20 @@ export type RegisterAdminEndpointBody = {
   latencyMs?: number;
   loadPercent?: number;
   port?: number;
+  // vless + REALITY
   publicKey?: string;
   shortId?: string;
   sni?: string;
   fingerprint?: string;
   flow?: string;
+  // trojan + TLS
+  trojanSni?: string;
+  trojanFingerprint?: string;
+  trojanAlpn?: string;
+  trojanCertSha256?: string;
+  // shadowsocks-2022
+  ssMethod?: string;
+  ssServerKey?: string;
 };
 
 export type SetAdminEndpointActiveBody = {
@@ -269,6 +322,16 @@ export type SetAdminEndpointActiveBody = {
 export type VlessClientSummary = {
   uuid: string;
   flow: string;
+};
+
+// Протокольная diversity (Decision 052) — тот же source-of-truth паттерн,
+// что VlessClientSummary/listVlessClients, для двух новых протоколов.
+export type TrojanClientSummary = {
+  password: string;
+};
+
+export type ShadowsocksClientSummary = {
+  password: string;
 };
 
 export type LoginWithPasswordBody = {

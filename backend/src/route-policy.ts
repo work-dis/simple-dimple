@@ -355,6 +355,29 @@ export function buildRoutePolicy(input: {
 
   const primary = shortlist[0];
   const primaryServer = primary ? input.servers.find((server) => server.id === primary.endpointId) : undefined;
+
+  // Протокольная diversity (ROADMAP.md, Этап 6 / DECISIONS.md Decision 052):
+  // клиент по отчёту о неудачном подключении сначала должен получить другой
+  // сервер с тем же протоколом (частая причина отказа — конкретный IP/нода, а
+  // не сам протокол), и только если такого нет — сменить протокол
+  // (следующая стадия ниже, "transport_diagnostic_fallback"). Строго перед
+  // ней в shortlist, чтобы executor на клиенте (connectFallback.ts) перебирал
+  // именно в этом порядке.
+  const sameProtocolFallback = primaryServer
+    ? pickBestMatchingServerWithFallback(
+        candidateServers,
+        seenEndpointIds,
+        routeHealthMap,
+        serverOrder,
+        (server) =>
+          server.protocol === primaryServer.protocol &&
+          !isSameRegionalDomain(server, primaryServer) &&
+          hasIndependentFailureDomain(server, primaryServer),
+        (server) => server.protocol === primaryServer.protocol && hasDifferentIp(server, primaryServer)
+      )
+    : undefined;
+  appendPolicyCandidate(shortlist, seenEndpointIds, sameProtocolFallback, "same_protocol_fallback");
+
   const secondChoice = primaryServer
     ? pickBestMatchingServerWithFallback(
         candidateServers,
@@ -424,7 +447,10 @@ export function buildRoutePolicy(input: {
   const emergencyRemaining = healthRankedCandidateServers.filter((server) => !seenEndpointIds.has(server.id));
 
   for (const server of [...emergencyPreferred, ...emergencyRemaining]) {
-    if (shortlist.length >= 4) {
+    // Кап поднят с 4 до 5 (Decision 052) — new same_protocol_fallback stage
+    // добавляет один пункт раньше в shortlist, а кол-во diversity/emergency
+    // мест должно остаться прежним, а не сократиться на единицу.
+    if (shortlist.length >= 5) {
       break;
     }
 
@@ -433,7 +459,7 @@ export function buildRoutePolicy(input: {
 
   if (shortlist.length === 0 && candidateServers !== input.servers) {
     for (const server of rankServersForSelection(input.servers, routeHealthMap, serverOrder)) {
-      if (shortlist.length >= 4) {
+      if (shortlist.length >= 5) {
         break;
       }
 
