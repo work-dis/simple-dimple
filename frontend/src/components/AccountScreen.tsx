@@ -1,10 +1,4 @@
-import type {
-  AuthSession,
-  AuthChallenge,
-  AccountSummary,
-  VerificationProvider,
-} from "../types";
-import { AuthForms } from "./AuthForms";
+import type { AuthSession, AccountSummary } from "../types";
 
 interface Props {
   auth: AuthSession | null;
@@ -13,31 +7,10 @@ interface Props {
   contactDraft: string;
   isLoading: boolean;
   isSubmitting: boolean;
-  loginDraft: string;
-  passwordDraft: string;
-  registerNameDraft: string;
-  challengeProvider: VerificationProvider;
-  challengeTargetDraft: string;
-  challengeCodeDraft: string;
-  challengeDisplayNameDraft: string;
-  activeChallenge: AuthChallenge | null;
-  authMode: "login" | "register" | "code";
   onSetDisplayNameDraft: (value: string) => void;
   onSetContactDraft: (value: string) => void;
   onSaveContact: () => void;
   onLogout: () => void;
-  onSetLoginDraft: (value: string) => void;
-  onSetPasswordDraft: (value: string) => void;
-  onSetRegisterNameDraft: (value: string) => void;
-  onSetChallengeProvider: (value: VerificationProvider) => void;
-  onSetChallengeTargetDraft: (value: string) => void;
-  onSetChallengeCodeDraft: (value: string) => void;
-  onSetChallengeDisplayNameDraft: (value: string) => void;
-  onSetAuthMode: (mode: "login" | "register" | "code") => void;
-  onLoginWithPassword: () => void;
-  onRegisterWithPassword: () => void;
-  onRequestVerificationCode: () => void;
-  onVerifyCodeAuth: () => void;
   onOpenServersConfig: () => void;
 }
 
@@ -48,34 +21,12 @@ export function AccountScreen({
   contactDraft,
   isLoading,
   isSubmitting,
-  loginDraft,
-  passwordDraft,
-  registerNameDraft,
-  challengeProvider,
-  challengeTargetDraft,
-  challengeCodeDraft,
-  challengeDisplayNameDraft,
-  activeChallenge,
-  authMode,
   onSetDisplayNameDraft,
   onSetContactDraft,
   onSaveContact,
   onLogout,
-  onSetLoginDraft,
-  onSetPasswordDraft,
-  onSetRegisterNameDraft,
-  onSetChallengeProvider,
-  onSetChallengeTargetDraft,
-  onSetChallengeCodeDraft,
-  onSetChallengeDisplayNameDraft,
-  onSetAuthMode,
-  onLoginWithPassword,
-  onRegisterWithPassword,
-  onRequestVerificationCode,
-  onVerifyCodeAuth,
   onOpenServersConfig,
 }: Props) {
-  const isAuthenticated = auth?.isAuthenticated ?? false;
   const accountStatusLabel =
     account?.subscription.status === "active"
       ? "Подписка активна"
@@ -138,119 +89,89 @@ export function AccountScreen({
         </div>
       </div>
 
-      {isAuthenticated ? (
-        <>
-          <div className="accountEditor">
-            <label className="fieldLabel" htmlFor="display-name-input">
-              Имя в аккаунте
-            </label>
-            <input
-              id="display-name-input"
-              className="textInput"
-              type="text"
-              value={displayNameDraft}
-              onChange={(e) => onSetDisplayNameDraft(e.target.value)}
-              placeholder="Как тебя показывать в аккаунте"
-              disabled={isLoading || isSubmitting}
-            />
-            <label className="fieldLabel" htmlFor="contact-input">
-              Контакт для связи
-            </label>
-            <input
-              id="contact-input"
-              className="textInput"
-              type="text"
-              value={contactDraft}
-              onChange={(e) => onSetContactDraft(e.target.value)}
-              placeholder="telegram @username или email"
-              disabled={isLoading || isSubmitting}
-            />
-            <button
-              className="secondaryButton"
-              onClick={onSaveContact}
-              disabled={isLoading || isSubmitting}
-            >
-              Сохранить контакт
-            </button>
-          </div>
-
-          <div className="accountActions">
-            {/* Задача #14 (PRIORITY_PLAN.md) — конфиги/сертификаты по каждому
-                серверу живут отдельным экраном, а не среди полей аккаунта. */}
-            <button
-              className="secondaryButton fullWidth"
-              onClick={onOpenServersConfig}
-              disabled={isLoading || isSubmitting}
-            >
-              Конфигурации серверов
-            </button>
-            {/* Read-only статус — нет backend-эндпоинта для переключения autoRenew, поэтому не <button> */}
-            <span className="secondaryButton statusBadge">
-              {account?.subscription.autoRenew
-                ? "Автопродление включено"
-                : "Автопродление выключено"}
-            </span>
-            <button
-              className="ghostButton fullWidth"
-              onClick={onLogout}
-              disabled={isLoading || isSubmitting}
-            >
-              Выйти
-            </button>
-          </div>
-
-          {account?.devices.length ? (
-            <div className="deviceList">
-              {account.devices.map((device) => (
-                <div key={device.id} className="deviceCard">
-                  <span>
-                    {device.name} · {device.platform}
-                  </span>
-                  <strong>
-                    {device.isCurrent ? "Текущее устройство" : "Другое устройство"} ·{" "}
-                    {new Date(device.lastSeenAt).toLocaleString("ru-RU")}
-                  </strong>
-                </div>
-              ))}
-            </div>
-          ) : null}
-
-          <div className="accountFootnote">
-            <span>{accountStatusLabel}</span>
-            <strong>
-              {account
-                ? `С нами с ${new Date(account.user.memberSince).toLocaleDateString("ru-RU")}`
-                : "Загружаем данные аккаунта..."}
-            </strong>
-          </div>
-        </>
-      ) : (
-        <AuthForms
-          isLoading={isLoading}
-          isSubmitting={isSubmitting}
-          loginDraft={loginDraft}
-          passwordDraft={passwordDraft}
-          registerNameDraft={registerNameDraft}
-          challengeProvider={challengeProvider}
-          challengeTargetDraft={challengeTargetDraft}
-          challengeCodeDraft={challengeCodeDraft}
-          challengeDisplayNameDraft={challengeDisplayNameDraft}
-          activeChallenge={activeChallenge}
-          authMode={authMode}
-          onSetLoginDraft={onSetLoginDraft}
-          onSetPasswordDraft={onSetPasswordDraft}
-          onSetRegisterNameDraft={onSetRegisterNameDraft}
-          onSetChallengeProvider={onSetChallengeProvider}
-          onSetChallengeTargetDraft={onSetChallengeTargetDraft}
-          onSetChallengeCodeDraft={onSetChallengeCodeDraft}
-          onSetChallengeDisplayNameDraft={onSetChallengeDisplayNameDraft}
-          onSetAuthMode={onSetAuthMode}
-          onLoginWithPassword={onLoginWithPassword}
-          onRegisterWithPassword={onRegisterWithPassword}
-          onRequestVerificationCode={onRequestVerificationCode}
-          onVerifyCodeAuth={onVerifyCodeAuth}
+      <div className="accountEditor">
+        <label className="fieldLabel" htmlFor="display-name-input">
+          Имя в аккаунте
+        </label>
+        <input
+          id="display-name-input"
+          className="textInput"
+          type="text"
+          value={displayNameDraft}
+          onChange={(e) => onSetDisplayNameDraft(e.target.value)}
+          placeholder="Как тебя показывать в аккаунте"
+          disabled={isLoading || isSubmitting}
         />
-      )}
+        <label className="fieldLabel" htmlFor="contact-input">
+          Контакт для связи
+        </label>
+        <input
+          id="contact-input"
+          className="textInput"
+          type="text"
+          value={contactDraft}
+          onChange={(e) => onSetContactDraft(e.target.value)}
+          placeholder="telegram @username или email"
+          disabled={isLoading || isSubmitting}
+        />
+        <button
+          className="secondaryButton"
+          onClick={onSaveContact}
+          disabled={isLoading || isSubmitting}
+        >
+          Сохранить контакт
+        </button>
+      </div>
+
+      <div className="accountActions">
+        {/* Задача #14 (PRIORITY_PLAN.md) — конфиги/сертификаты по каждому
+            серверу живут отдельным экраном, а не среди полей аккаунта. */}
+        <button
+          className="secondaryButton fullWidth"
+          onClick={onOpenServersConfig}
+          disabled={isLoading || isSubmitting}
+        >
+          Конфигурации серверов
+        </button>
+        {/* Read-only статус — нет backend-эндпоинта для переключения autoRenew, поэтому не <button> */}
+        <span className="secondaryButton statusBadge">
+          {account?.subscription.autoRenew
+            ? "Автопродление включено"
+            : "Автопродление выключено"}
+        </span>
+        <button
+          className="ghostButton fullWidth"
+          onClick={onLogout}
+          disabled={isLoading || isSubmitting}
+        >
+          Выйти
+        </button>
+      </div>
+
+      {account?.devices.length ? (
+        <div className="deviceList">
+          {account.devices.map((device) => (
+            <div key={device.id} className="deviceCard">
+              <span>
+                {device.name} · {device.platform}
+              </span>
+              <strong>
+                {device.isCurrent ? "Текущее устройство" : "Другое устройство"} ·{" "}
+                {new Date(device.lastSeenAt).toLocaleString("ru-RU")}
+              </strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="accountFootnote">
+        <span>{accountStatusLabel}</span>
+        <strong>
+          {account
+            ? `С нами с ${new Date(account.user.memberSince).toLocaleDateString("ru-RU")}`
+            : "Загружаем данные аккаунта..."}
+        </strong>
+      </div>
     </>
   );
 }

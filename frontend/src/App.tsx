@@ -10,7 +10,10 @@ import {
   AccountServersScreen,
   AdminScreen,
   HomeScreen,
+  LoginCodeScreen,
+  LoginScreen,
   OpsScreen,
+  RegisterScreen,
   ServerAdvancedScreen,
   ServerScreen,
 } from "./components";
@@ -37,7 +40,13 @@ function App() {
   const authAccount = useAuthAccount({
     onClearError: () => setError(null),
     onError: setError,
-    onAuthSuccess: routeSession.loadSession,
+    onAuthSuccess: () => {
+      // Регистрация и вход по коду живут на отдельных экранах (register/loginCode),
+      // поэтому после успешной аутентификации нужно явно вернуться на account —
+      // иначе пользователь остаётся на форме регистрации без обратной связи.
+      setScreen("account");
+      return routeSession.loadSession();
+    },
   });
   const routeDecisionOps = useRouteDecisionOps({
     onClearError: () => setError(null),
@@ -178,14 +187,21 @@ function App() {
     screen === "serverAdvanced" ||
     screen === "account" ||
     screen === "accountServers" ||
+    screen === "register" ||
+    screen === "loginCode" ||
     screen === "ops" ||
     screen === "admin";
 
-  // Под-экраны ("Дополнительные настройки", "Конфигурации серверов") должны
-  // возвращать на свой родительский экран, а не сразу на home — иначе
-  // навигация Account → Servers → назад перепрыгивала бы через сам Account.
+  // Под-экраны ("Дополнительные настройки", "Конфигурации серверов", "Регистрация",
+  // "Вход по коду") должны возвращать на свой родительский экран, а не сразу на
+  // home — иначе навигация Account → Servers → назад перепрыгивала бы через сам
+  // Account.
   const backTarget: Screen =
-    screen === "serverAdvanced" ? "server" : screen === "accountServers" ? "account" : "home";
+    screen === "serverAdvanced"
+      ? "server"
+      : screen === "accountServers" || screen === "register" || screen === "loginCode"
+        ? "account"
+        : "home";
 
   /* ──────────── Render ──────────── */
 
@@ -284,40 +300,64 @@ function App() {
           />
         )}
 
-        {screen === "account" && (
-          <AccountScreen
-            auth={authAccount.auth}
-            account={authAccount.account}
-            displayNameDraft={authAccount.displayNameDraft}
-            contactDraft={authAccount.contactDraft}
+        {screen === "account" &&
+          (authAccount.isAuthenticated ? (
+            <AccountScreen
+              auth={authAccount.auth}
+              account={authAccount.account}
+              displayNameDraft={authAccount.displayNameDraft}
+              contactDraft={authAccount.contactDraft}
+              isLoading={isLoading}
+              isSubmitting={accountSubmitting}
+              onSetDisplayNameDraft={authAccount.setDisplayNameDraft}
+              onSetContactDraft={authAccount.setContactDraft}
+              onSaveContact={authAccount.saveContact}
+              onLogout={authAccount.logout}
+              onOpenServersConfig={() => setScreen("accountServers")}
+            />
+          ) : (
+            <LoginScreen
+              isLoading={isLoading}
+              isSubmitting={accountSubmitting}
+              loginDraft={authAccount.loginDraft}
+              passwordDraft={authAccount.passwordDraft}
+              onSetLoginDraft={authAccount.setLoginDraft}
+              onSetPasswordDraft={authAccount.setPasswordDraft}
+              onLoginWithPassword={authAccount.loginWithPassword}
+              onNavigateToRegister={() => setScreen("register")}
+              onNavigateToLoginCode={() => setScreen("loginCode")}
+            />
+          ))}
+
+        {screen === "register" && (
+          <RegisterScreen
             isLoading={isLoading}
             isSubmitting={accountSubmitting}
             loginDraft={authAccount.loginDraft}
             passwordDraft={authAccount.passwordDraft}
             registerNameDraft={authAccount.registerNameDraft}
+            onSetLoginDraft={authAccount.setLoginDraft}
+            onSetPasswordDraft={authAccount.setPasswordDraft}
+            onSetRegisterNameDraft={authAccount.setRegisterNameDraft}
+            onRegisterWithPassword={authAccount.registerWithPassword}
+          />
+        )}
+
+        {screen === "loginCode" && (
+          <LoginCodeScreen
+            isLoading={isLoading}
+            isSubmitting={accountSubmitting}
             challengeProvider={authAccount.challengeProvider}
             challengeTargetDraft={authAccount.challengeTargetDraft}
             challengeCodeDraft={authAccount.challengeCodeDraft}
             challengeDisplayNameDraft={authAccount.challengeDisplayNameDraft}
             activeChallenge={authAccount.activeChallenge}
-            authMode={authAccount.authMode}
-            onSetDisplayNameDraft={authAccount.setDisplayNameDraft}
-            onSetContactDraft={authAccount.setContactDraft}
-            onSaveContact={authAccount.saveContact}
-            onLogout={authAccount.logout}
-            onSetLoginDraft={authAccount.setLoginDraft}
-            onSetPasswordDraft={authAccount.setPasswordDraft}
-            onSetRegisterNameDraft={authAccount.setRegisterNameDraft}
             onSetChallengeProvider={authAccount.setChallengeProvider}
             onSetChallengeTargetDraft={authAccount.setChallengeTargetDraft}
             onSetChallengeCodeDraft={authAccount.setChallengeCodeDraft}
             onSetChallengeDisplayNameDraft={authAccount.setChallengeDisplayNameDraft}
-            onSetAuthMode={authAccount.setAuthMode}
-            onLoginWithPassword={authAccount.loginWithPassword}
-            onRegisterWithPassword={authAccount.registerWithPassword}
             onRequestVerificationCode={authAccount.requestVerificationCode}
             onVerifyCodeAuth={authAccount.verifyCodeAuth}
-            onOpenServersConfig={() => setScreen("accountServers")}
           />
         )}
 

@@ -27,5 +27,7 @@ export type Screen =
   | "serverAdvanced"
   | "account"
   | "accountServers"
+  | "register"
+  | "loginCode"
   | "ops"
   | "admin";

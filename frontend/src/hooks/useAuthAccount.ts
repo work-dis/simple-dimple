@@ -25,9 +25,6 @@ export function useAuthAccount({
   const [account, setAccount] = useState<AccountSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [authMode, setAuthMode] = useState<"login" | "register" | "code">(
-    "login",
-  );
   const [loginDraft, setLoginDraft] = useState("");
   const [passwordDraft, setPasswordDraft] = useState("");
   const [registerNameDraft, setRegisterNameDraft] = useState("");
@@ -297,7 +294,6 @@ export function useAuthAccount({
     isSubmitting,
     isAuthenticated: auth?.isAuthenticated ?? false,
     isAdmin: account?.user.isAdmin ?? false,
-    authMode,
     loginDraft,
     passwordDraft,
     registerNameDraft,
@@ -308,7 +304,6 @@ export function useAuthAccount({
     displayNameDraft,
     contactDraft,
     activeChallenge,
-    setAuthMode,
     setLoginDraft,
     setPasswordDraft,
     setRegisterNameDraft,
