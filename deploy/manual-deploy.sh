@@ -85,6 +85,7 @@ deploy_to_host() {
     --exclude 'backend/src/generated' \
     --exclude 'deploy/ssh.env' \
     --exclude 'deploy/.env' \
+    --exclude 'deploy/monitoring/local/' \
     ./ "${host_user}@${host_ip}:${DEPLOY_PATH}/"
 
   # CONTROL_PLANE_DOMAIN обязателен и должен совпадать с адресом ИМЕННО

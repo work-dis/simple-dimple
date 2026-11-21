@@ -25,13 +25,15 @@
 #
 # Запускать НА самой Xray-ноде (тот же хост, где provision-node.sh поднял
 # контейнер), по cron, например раз в 5 минут:
-#   */5 * * * * /opt/simple-dimple/deploy/xray/sync-clients.sh --pool fr-test-1 --api-base https://<control-plane> --sync-token <FLEET_SYNC_TOKEN> >> /var/log/xray-sync-clients.log 2>&1
+#   */5 * * * * . /etc/simple-dimple/xray-sync.env && /opt/simple-dimple/deploy/xray/sync-clients.sh --pool fr-test-1 --api-base https://<control-plane> >> /var/log/xray-sync-clients.log 2>&1
 #
 # Использование:
+#   FLEET_SYNC_TOKEN=<token> sync-clients.sh --pool <pool-code> --api-base <url>
 #   sync-clients.sh --pool <pool-code> --api-base <url> --sync-token <FLEET_SYNC_TOKEN>
 #   sync-clients.sh --pool <pool-code> --api-base <url> --admin-session <x-auth-session-id>   # legacy
 #
-# --sync-token — выделенный статический токен (env FLEET_SYNC_TOKEN на
+# FLEET_SYNC_TOKEN / --sync-token — выделенный статический токен (одноимённый
+# env на
 # backend'е): не истекает и даёт доступ ТОЛЬКО к /api/admin/*-clients,
 # в отличие от admin-сессии, которая истекает через ~30 дней (authSessionTtlMs)
 # и открывает весь admin API. --admin-session оставлен для ручной отладки.
@@ -54,7 +56,7 @@ require_cmd() {
 pool_code=""
 api_base=""
 admin_session=""
-sync_token=""
+sync_token="${FLEET_SYNC_TOKEN:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

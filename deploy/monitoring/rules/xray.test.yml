@@ -1,0 +1,106 @@
+rule_files:
+  - xray.yml
+
+evaluation_interval: 30s
+
+tests:
+  - name: A sustained failure in one network suggests filtering and clears on recovery
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="xray_tcp",instance="192.0.2.10:443",probe_site="reference"}'
+        values: '1+0x12'
+      - series: 'probe_success{job="xray_tcp",instance="192.0.2.10:443",probe_site="affected-network"}'
+        values: '0+0x10 1+0x1'
+    alert_rule_test:
+      - eval_time: 4m30s
+        alertname: XrayPossibleIPBlock
+      - eval_time: 5m
+        alertname: XrayPossibleIPBlock
+        exp_alerts:
+          - exp_labels:
+              job: xray_tcp
+              instance: '192.0.2.10:443'
+              probe_site: affected-network
+              severity: warning
+            exp_annotations:
+              summary: 'Возможна блокировка 192.0.2.10:443'
+              description: 'TCP недоступен из сети affected-network 5 минут, из контрольной сети соединение проходит. Проверьте фильтрацию, firewall и маршрут.'
+      - eval_time: 5m
+        alertname: XrayEndpointUnreachable
+      - eval_time: 5m30s
+        alertname: XrayPossibleIPBlock
+
+  - name: Two failed probes without a working site indicate broad unavailability
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="xray_tcp",instance="192.0.2.10:443",probe_site="reference"}'
+        values: '0+0x10'
+      - series: 'probe_success{job="xray_tcp",instance="192.0.2.10:443",probe_site="affected-network"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: XrayPossibleIPBlock
+      - eval_time: 5m
+        alertname: XrayEndpointUnreachable
+        exp_alerts:
+          - exp_labels:
+              instance: '192.0.2.10:443'
+              severity: critical
+            exp_annotations:
+              summary: 'Xray 192.0.2.10:443 недоступен'
+              description: 'TCP не проходит минимум из двух сетей в течение 5 минут. Проверьте узел, порт и сетевой маршрут.'
+
+  - name: Scrape failure is a monitoring alert rather than a failed TCP probe
+    interval: 30s
+    input_series:
+      - series: 'probe_success{job="xray_tcp",instance="192.0.2.10:443",probe_site="reference"}'
+        values: '1+0x10'
+      - series: 'up{job="xray_tcp",instance="192.0.2.10:443",probe_site="affected-network"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: XrayPossibleIPBlock
+      - eval_time: 3m
+        alertname: XrayMonitoringTargetDown
+        exp_alerts:
+          - exp_labels:
+              job: xray_tcp
+              instance: '192.0.2.10:443'
+              probe_site: affected-network
+              severity: warning
+            exp_annotations:
+              summary: 'Потерян источник мониторинга xray_tcp'
+              description: 'Prometheus не получает метрики для 192.0.2.10:443 из сети affected-network.'
+
+  - name: Stale log snapshots stop triggering probing alerts
+    interval: 30s
+    input_series:
+      - series: 'xray_reality_rejections_last_5m{job="xray_logs",instance="192.0.2.40:9100",pool="fr-1"}'
+        values: '30+0x12'
+      - series: 'xray_reality_log_collection_timestamp_seconds{job="xray_logs",instance="192.0.2.40:9100",pool="fr-1"}'
+        values: '0+0x12'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: XrayPossibleProbing
+        exp_alerts:
+          - exp_labels:
+              job: xray_logs
+              instance: '192.0.2.40:9100'
+              pool: fr-1
+              severity: warning
+            exp_annotations:
+              summary: 'Возможно зондирование Xray, пул fr-1'
+              description: 'За последние 5 минут зафиксировано 30 отклонений REALITY на 192.0.2.40:9100. Проверьте логи узла и настройки клиентов.'
+      - eval_time: 2m30s
+        alertname: XrayPossibleProbing
+      - eval_time: 5m30s
+        alertname: XrayLogCollectionStale
+        exp_alerts:
+          - exp_labels:
+              job: xray_logs
+              instance: '192.0.2.40:9100'
+              pool: fr-1
+              severity: warning
+            exp_annotations:
+              summary: 'Перестал обновляться сбор логов Xray на 192.0.2.40:9100'
+              description: 'Проверьте запуск сборщика для пула fr-1 и доступ к docker logs.'

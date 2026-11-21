@@ -1,0 +1,58 @@
+groups:
+  - name: xray_network
+    rules:
+      - alert: XrayPossibleIPBlock
+        expr: |
+          (probe_success{job="xray_tcp",probe_site!="reference"} == 0)
+          and on(instance) (probe_success{job="xray_tcp",probe_site="reference"} == 1)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Возможна блокировка {{ $labels.instance }}'
+          description: 'TCP недоступен из сети {{ $labels.probe_site }} 5 минут, из контрольной сети соединение проходит. Проверьте фильтрацию, firewall и маршрут.'
+
+      - alert: XrayEndpointUnreachable
+        expr: |
+          count by (instance) (count by (instance, probe_site) (probe_success{job="xray_tcp"} == 0)) >= 2
+          unless on(instance) (probe_success{job="xray_tcp"} == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Xray {{ $labels.instance }} недоступен'
+          description: 'TCP не проходит минимум из двух сетей в течение 5 минут. Проверьте узел, порт и сетевой маршрут.'
+
+      - alert: XrayMonitoringTargetDown
+        expr: up{job=~"xray_tcp|xray_logs"} == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Потерян источник мониторинга {{ $labels.job }}'
+          description: 'Prometheus не получает метрики для {{ $labels.instance }}{{ with $labels.probe_site }} из сети {{ . }}{{ end }}.'
+
+  - name: xray_logs
+    rules:
+      - alert: XrayPossibleProbing
+        expr: |
+          xray_reality_rejections_last_5m{job="xray_logs"} >= 30
+          and on(instance, pool) (time() - xray_reality_log_collection_timestamp_seconds{job="xray_logs"} < 150)
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Возможно зондирование Xray, пул {{ $labels.pool }}'
+          description: 'За последние 5 минут зафиксировано {{ printf "%.0f" $value }} отклонений REALITY на {{ $labels.instance }}. Проверьте логи узла и настройки клиентов.'
+
+      - alert: XrayLogCollectionStale
+        expr: |
+          (time() - xray_reality_log_collection_timestamp_seconds{job="xray_logs"} >= 150)
+          or ((up{job="xray_logs"} == 1) unless on(instance) xray_reality_log_collection_timestamp_seconds{job="xray_logs"})
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Перестал обновляться сбор логов Xray на {{ $labels.instance }}'
+          description: 'Проверьте запуск сборщика{{ with $labels.pool }} для пула {{ . }}{{ end }} и доступ к docker logs.'
+

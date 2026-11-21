@@ -1,0 +1,40 @@
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+rule_files:
+  - rules/xray.yml
+
+scrape_configs:
+  - job_name: alertmanager
+    static_configs:
+      - targets: ['alertmanager:9093']
+
+  - job_name: xray_tcp
+    metrics_path: /probe
+    params:
+      module: [xray_tcp]
+    file_sd_configs:
+      - files: ['targets/xray-tcp.yml']
+    relabel_configs:
+      - source_labels: [probe_site, probe_address]
+        regex: '.+;.+'
+        action: keep
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - source_labels: [probe_address]
+        target_label: __address__
+      - regex: probe_address
+        action: labeldrop
+
+  - job_name: xray_logs
+    file_sd_configs:
+      - files: ['targets/xray-logs.yml']

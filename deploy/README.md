@@ -91,6 +91,12 @@ Let's Encrypt без валидного DNS уйдёт в crash-loop "no certifi
 available"; в режиме `tls internal` без явного хоста в `CONTROL_PLANE_DOMAIN`
 роняет TLS handshake на любое соединение — см. Decision 040 для деталей).
 
+## Мониторинг Xray
+
+[Prometheus и Alertmanager](monitoring/README.md) проверяют доступность TCP-портов
+Xray из разных сетей и отслеживают всплески отклонённых соединений REALITY.
+Настройки подходят для отдельного стека и для подключения к существующему Prometheus.
+
 ## Настройка VPS (нужно один раз, до первого запуска `manual-deploy.sh`)
 
 Docker + compose plugin на VPS нужно поставить заранее:

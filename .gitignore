@@ -9,6 +9,7 @@ backend/src/generated
 deploy/.env
 deploy/ssh.env
 deploy/ansible/inventory.ini
+deploy/monitoring/local/
 
 # Реальный REALITY-keypair — генерируется локально через
 # deploy/xray/generate-dev-config.sh, в git не попадает.

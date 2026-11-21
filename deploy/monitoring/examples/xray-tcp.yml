@@ -1,0 +1,13 @@
+- targets:
+    - '192.0.2.10:443'
+    - '192.0.2.20:443'
+  labels:
+    probe_site: reference
+    probe_address: blackbox:9115
+
+- targets:
+    - '192.0.2.10:443'
+    - '192.0.2.20:443'
+  labels:
+    probe_site: affected-network
+    probe_address: '192.0.2.30:9115'

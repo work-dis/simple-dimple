@@ -1,0 +1,50 @@
+name: simple-dimple-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./rules:/etc/prometheus/rules:ro
+      - ./local/targets:/etc/prometheus/targets:ro
+      - prometheus_data:/prometheus
+
+  alertmanager:
+    image: prom/alertmanager:v0.35.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --cluster.listen-address=
+    ports:
+      - "127.0.0.1:9093:9093"
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    secrets:
+      - telegram_bot_token
+      - telegram_chat_id
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.29.1
+    restart: unless-stopped
+    volumes:
+      - ./blackbox.yml:/config/blackbox.yml:ro
+    command: [--config.file=/config/blackbox.yml]
+
+secrets:
+  telegram_bot_token:
+    file: ./local/telegram_bot_token
+  telegram_chat_id:
+    file: ./local/telegram_chat_id
+
+volumes:
+  prometheus_data:
+  alertmanager_data:

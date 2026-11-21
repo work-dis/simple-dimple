@@ -1,0 +1,23 @@
+name: simple-dimple-monitoring-agent
+
+services:
+  blackbox:
+    image: prom/blackbox-exporter:v0.29.1
+    restart: unless-stopped
+    ports:
+      - "${MONITORING_BIND_IP:-127.0.0.1}:9115:9115"
+    volumes:
+      - ./blackbox.yml:/config/blackbox.yml:ro
+    command: [--config.file=/config/blackbox.yml]
+
+  node-exporter:
+    image: prom/node-exporter:v1.13.1
+    restart: unless-stopped
+    ports:
+      - "${MONITORING_BIND_IP:-127.0.0.1}:9100:9100"
+    volumes:
+      - /var/lib/simple-dimple-monitoring:/textfile:ro
+    command:
+      - --collector.disable-defaults
+      - --collector.textfile
+      - --collector.textfile.directory=/textfile
